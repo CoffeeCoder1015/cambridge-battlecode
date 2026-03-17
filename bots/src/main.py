@@ -11,6 +11,7 @@ This bot:
 """
 
 import random
+import sys
 
 from cambc import Controller, Direction, EntityType, Environment, Position
 
@@ -23,6 +24,12 @@ class Player:
         self.num_spawned = 0
 
     def run(self, ct: Controller) -> None:
+        
+        self.map_height = ct.get_map_height()
+        self.map_width = ct.get_map_width()
+        print(f"Map height: {self.map_height}, Map width: {self.map_width}", file=sys.stderr)
+
+
         etype = ct.get_entity_type()
         if etype == EntityType.CORE:
             core.run(ct, self)
