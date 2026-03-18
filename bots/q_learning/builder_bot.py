@@ -206,7 +206,29 @@ class Builder_bot:
                 self.stuck_counter += 1
                 if self.stuck_counter >= 5: # Hard bounce (USER requested 5)
                     new_dir = reflect_direction(self.spawn_direction, ct, my_pos)
-                    print(f"[{ct.get_id()}] BOUNCE: {self.spawn_direction.name} -> {new_dir.name}", file=sys.stderr)
+                    
+                    # USER REFINEMENT: If it's a direct reversal, pick a random side direction instead
+                    if new_dir == self.spawn_direction.opposite():
+                        # Sides are directions that aren't forward (including diagonals) or backward
+                        # Relative to North (0, -1):
+                        # Forward: North, NW, NE. Backward: South.
+                        # Sides: West, SW, East, SE.
+                        
+                        sides = []
+                        for d in DIRECTIONS:
+                            # Not forward: dot product <= 0
+                            # Not backward: not equal to opposite
+                            if dir_dot(d, self.spawn_direction) <= 0 and d != self.spawn_direction.opposite():
+                                sides.append(d)
+                        
+                        if sides:
+                            new_dir = random.choice(sides)
+                            print(f"[{ct.get_id()}] HEAD-ON BOUNCE: {self.spawn_direction.name} -> SIDE {new_dir.name}", file=sys.stderr)
+                        else:
+                            print(f"[{ct.get_id()}] BOUNCE: {self.spawn_direction.name} -> {new_dir.name}", file=sys.stderr)
+                    else:
+                        print(f"[{ct.get_id()}] BOUNCE: {self.spawn_direction.name} -> {new_dir.name}", file=sys.stderr)
+                        
                     self.spawn_direction = new_dir
                     self.stuck_counter = 0
                     self._resample_heading(ct)
