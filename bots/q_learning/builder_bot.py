@@ -31,6 +31,61 @@ def gaussian(x: float, variance: float) -> float:
 
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 
+def vec_to_dir(dx: int, dy: int) -> Direction:
+    """Snap an (dx, dy) vector to the nearest Direction enum."""
+    # Clamp to -1..1
+    dx = max(-1, min(1, dx))
+    dy = max(-1, min(1, dy))
+    if dx == 0 and dy == 0:
+        return Direction.NORTH  # Fallback
+    for d, vec in DIR_VECTORS.items():
+        if vec == (dx, dy):
+            return d
+    return Direction.NORTH  # Fallback
+
+def reflect_direction(heading: Direction, ct: 'Controller', my_pos) -> Direction:
+    """Reflect heading off blocking surfaces via vector math.
+    Probes adjacent tiles to determine which axis is blocked,
+    then flips the blocked component of the heading vector."""
+    hx, hy = DIR_VECTORS[heading]
+    
+    # Probe X/Y components: only mark as blocked if there is a PERMANENT obstruction
+    x_blocked = False
+    y_blocked = False
+    
+    if hx != 0:
+        x_probe = my_pos.add(vec_to_dir(hx, 0))
+        try:
+            env = ct.get_tile_env(x_probe)
+            if env in (Environment.WALL, Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
+                x_blocked = True
+            elif ct.get_tile_building_id(x_probe) is not None:
+                x_blocked = True # Blocked by building
+            # If it's EMPTY or has a bot, we don't treat it as a hard 'wall' for bouncing
+        except Exception:
+            x_blocked = True # Map edge
+    
+    if hy != 0:
+        y_probe = my_pos.add(vec_to_dir(0, hy))
+        try:
+            env = ct.get_tile_env(y_probe)
+            if env in (Environment.WALL, Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
+                y_blocked = True
+            elif ct.get_tile_building_id(y_probe) is not None:
+                y_blocked = True
+        except Exception:
+            y_blocked = True
+    
+    # Reflect blocked components
+    rx = -hx if x_blocked else hx
+    ry = -hy if y_blocked else hy
+    
+    # If nothing was detected as specifically blocked but we are stuck, flip everything
+    if not x_blocked and not y_blocked:
+        rx, ry = -hx, -hy
+    
+    return vec_to_dir(rx, ry)
+
 class Builder_bot:
     def __init__(self):
         # MVP 1 state
@@ -48,6 +103,7 @@ class Builder_bot:
         self.stuck_counter = 0
         self.steps_since_resample = 0
         self.target_ore_pos = None
+        self.last_built_pos = None  # Tail of our conveyor chain
 
     def get_orthogonal_step(self):
         dx, dy = DIR_VECTORS[self.spawn_direction]
@@ -128,11 +184,30 @@ class Builder_bot:
         if not self.initialized:
             self._initialize_first_round(ct)
             return
-            
+
         my_pos = ct.get_position()
         ct.draw_indicator_dot(my_pos, 0, 0, 255)
+
+        # 0. Stuck detection (Tiered)
+        # We check at the START so that early returns from tasks don't bypass counter
+        if self.prev_pos is not None and self.prev_pos == my_pos:
+            # ONLY increment if we are not on cooldown (if we are on cooldown, we aren't 'stuck', just waiting)
+            if ct.get_move_cooldown() == 0 and ct.get_action_cooldown() == 0:
+                self.stuck_counter += 1
+                if self.stuck_counter >= 15: # Hard bounce
+                    new_dir = reflect_direction(self.spawn_direction, ct, my_pos)
+                    print(f"[{ct.get_id()}] BOUNCE: {self.spawn_direction.name} -> {new_dir.name}", file=sys.stderr)
+                    self.spawn_direction = new_dir
+                    self._resample_heading(ct)
+                    self.stuck_counter = 0
+                elif self.stuck_counter >= 7: # Soft resample
+                    self.steps_on_heading += 1
+                    self._resample_heading(ct)
+        else:
+            self.stuck_counter = 0
+        self.prev_pos = my_pos
         
-        # 1. Process forced setup tasks (like elbows)
+        # 1. Process forced setup tasks (like elbows, chain links)
         if len(self.tasks) > 0:
             task = self.tasks[0]
             task_type, pos, direction = task
@@ -143,6 +218,9 @@ class Builder_bot:
                         self.conveyor_budget -= 1
                         if self.conveyor_budget <= 0:
                             self.mode = "scout"
+                elif task_type == "road":
+                    if ct.can_build_road(pos):
+                        ct.build_road(pos)
                 self.tasks.pop(0)
             return
 
@@ -154,7 +232,7 @@ class Builder_bot:
             for tile_pos in nearby_tiles:
                 try:
                     env = ct.get_tile_env(tile_pos)
-                    if env in (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
+                    if env == Environment.ORE_TITANIUM:
                         # Skip if a harvester is already built on this ore
                         if ct.get_tile_building_id(tile_pos) is not None:
                             continue
@@ -187,6 +265,13 @@ class Builder_bot:
                     if ct.can_build_harvester(self.target_ore_pos):
                         ct.build_harvester(self.target_ore_pos)
                         print(f"[{ct.get_id()}] Placed harvester at {self.target_ore_pos}", file=sys.stderr)
+                        # Queue a conveyor on our current tile pointing towards the harvester
+                        # This links the chain to the harvester
+                        link_dir = my_pos.direction_to(self.target_ore_pos)
+                        if self.mode == "builder" and self.conveyor_budget > 0:
+                            self.tasks.append(("conveyor", my_pos, link_dir))
+                        else:
+                            self.tasks.append(("road", my_pos, None))
                     self.target_ore_pos = None  # Clear regardless
                 return
             else:
@@ -228,8 +313,8 @@ class Builder_bot:
                 candidate = candidate.rotate_right()
                 continue
                 
-            # Don't try backward directions
-            if is_backward(candidate, self.spawn_direction):
+            # Don't try backward directions (unless approaching ore)
+            if self.target_ore_pos is None and is_backward(candidate, self.spawn_direction):
                 candidate = candidate.rotate_right()
                 continue
                 
@@ -273,6 +358,7 @@ class Builder_bot:
         # 3. Step forward
         if ct.get_move_cooldown() == 0:
             if ct.can_move(candidate):
+                old_pos = ct.get_position()
                 ct.move(candidate)
                 self.steps_on_heading += 1
                 self.steps_since_resample -= 1
@@ -280,19 +366,18 @@ class Builder_bot:
                 if self.steps_since_resample <= 0:
                     self._resample_heading(ct)
                 
-                # Check if we need to pave our vacated tile to connect the chain
-                if self.vacated_task is not None:
-                    self.tasks.append(self.vacated_task)
-                    self.vacated_task = None
-                
-        # 4. Stuck detection
+        # Check if we need to pave our vacated tile to connect the chain
+        if self.vacated_task is not None:
+            self.tasks.append(self.vacated_task)
+            self.vacated_task = None
+        
+        # Queue paving on the tile we just left (for ore approach or normal movement)
         new_pos = ct.get_position()
-        if self.prev_pos is not None and self.prev_pos == new_pos:
-            self.stuck_counter += 1
-            if self.stuck_counter >= 5: # Stuck threshold
-                self.steps_on_heading += 1 # Resample orthogonal direction manually to break symmetry sometimes
-                self._resample_heading(ct)
-                self.stuck_counter = 0
-        else:
-            self.stuck_counter = 0
-        self.prev_pos = new_pos
+        if my_pos != new_pos:
+            pave_dir = my_pos.direction_to(new_pos)  # Points forward (we want backward)
+            if self.mode == "builder" and self.conveyor_budget > 0:
+                # Build conveyor pointing backwards (towards core)
+                self.vacated_task = ("conveyor", my_pos, pave_dir.opposite())
+            elif self.mode == "scout":
+                self.vacated_task = ("road", my_pos, None)
+            self.last_built_pos = my_pos
