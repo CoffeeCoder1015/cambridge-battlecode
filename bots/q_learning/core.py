@@ -8,8 +8,7 @@ DIRECTIONS = [
 class Core:
     def __init__(self):
         self.spawned = 0
-        self.required_titanium = 0 # Staircase floor
-        self.pack_remaining = 0
+        self.reinvestment_budget = 0 # Available titanium for spawning
         self.last_titanium = 0
         self.moving_avg_growth = 0 # EMA of titanium income
         # Opposite direction index pairs for symmetry: (N,S), (E,W), (NE,SW), (SE,NW)
@@ -24,36 +23,25 @@ class Core:
         if rnd > 0:
             delta = max(0, titanium - self.last_titanium)
             self.moving_avg_growth = self.moving_avg_growth * 0.95 + delta * 0.05
+            
+            # 0.5. Budget Accrual (Flow Economy)
+            # Reinvest 80% of growth if above safety threshold
+            if self.moving_avg_growth >= 1.2:
+                self.reinvestment_budget += self.moving_avg_growth * 0.8
+        
         self.last_titanium = titanium
 
         if ct.get_action_cooldown() == 0:
-            # 1. Opening Sequence (Max 4 bots initially)
+            # 1. Opening Sequence (Max 4 bots initially) - "Free" or low-cost start
             if rnd < 60:
                 if self.spawned < 4 and titanium >= 20:
                     self._spawn(ct)
-                    if self.spawned == 4:
-                        # Set first staircase floor (Recoup ~400 Ti from opening + 10% profit)
-                        self.required_titanium = titanium + 440
                 return
 
-            # 2. Staircase Logic: Only spawn if we hit the profit target
-            if self.pack_remaining > 0:
-                # Continue current pack
-                if titanium >= 20:
-                    self._spawn(ct)
-            elif titanium >= max(600, self.required_titanium):
-                # Calculate dynamic pack size: 0.5 * growth rate (min 2)
-                # We use a multiplier to convert growth/round into a reasonable batch
-                # If growth is 10/rd, pack is ~5.
-                pack_size = max(2, int(self.moving_avg_growth * 0.5))
-                if pack_size % 2 != 0:
-                    pack_size += 1 # Maintain pair symmetry
-                
-                self.pack_remaining = pack_size
-                # Next floor = Pre-pack Bank + (bots * cost * 1.1)
-                self.required_titanium = titanium + (pack_size * 132)
-                
+            # 2. Flow Reinvestment: Spawn if budget allows (Cost per bot ~132)
+            if self.reinvestment_budget >= 132 and titanium >= 20:
                 self._spawn(ct)
+                self.reinvestment_budget -= 132
 
     def _spawn(self, ct: Controller):
         # Opposite direction index pairs for symmetry: (N,S), (E,W), (NE,SW), (SE,NW)
@@ -68,5 +56,3 @@ class Core:
         if ct.can_spawn(spawn_pos):
             ct.spawn_builder(spawn_pos)
             self.spawned += 1
-            if self.pack_remaining > 0:
-                self.pack_remaining -= 1
