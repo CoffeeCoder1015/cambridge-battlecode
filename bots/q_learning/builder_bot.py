@@ -207,6 +207,47 @@ class Builder_bot:
             self.stuck_counter = 0
         self.prev_pos = my_pos
         
+        # 0.5 Enemy Sabotage Logic
+        enemy_buildings = ct.get_nearby_buildings()
+        target_sabotage_pos = None
+        for b_id in enemy_buildings:
+            if ct.get_team(b_id) != ct.get_team():
+                b_type = ct.get_entity_type(b_id)
+                # Prioritize infrastructure that we can effectively destroy
+                if b_type in (EntityType.CONVEYOR, EntityType.ROAD, EntityType.BRIDGE, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR):
+                    b_pos = ct.get_position(b_id)
+                    # If we are ON the enemy building, BOOM
+                    if b_pos == my_pos:
+                        print(f"[{ct.get_id()}] SABOTAGE: On enemy {b_type.value} at {b_pos}. Self-destructing!", file=sys.stderr)
+                        ct.self_destruct()
+                        return
+                    
+                    # Otherwise, prioritize the closest one
+                    if target_sabotage_pos is None:
+                        target_sabotage_pos = b_pos
+                    else:
+                        dist_new = my_pos.distance_squared(b_pos)
+                        dist_old = my_pos.distance_squared(target_sabotage_pos)
+                        if dist_new < dist_old:
+                            target_sabotage_pos = b_pos
+
+        if target_sabotage_pos is not None:
+            ct.draw_indicator_line(my_pos, target_sabotage_pos, 255, 165, 0) # Orange line for sabotage
+            ct.draw_indicator_dot(target_sabotage_pos, 255, 0, 0) # Red dot on target
+            
+            sabotage_dir = my_pos.direction_to(target_sabotage_pos)
+            if ct.get_move_cooldown() == 0:
+                # Try to move directly to the target
+                if ct.can_move(sabotage_dir):
+                    ct.move(sabotage_dir)
+                    return
+                else:
+                    # If blocked, try to rotate slightly towards it
+                    for d in [sabotage_dir.rotate_left(), sabotage_dir.rotate_right()]:
+                        if ct.can_move(d):
+                            ct.move(d)
+                            return
+        
         # 1. Process forced setup tasks (like elbows, chain links)
         if len(self.tasks) > 0:
             task = self.tasks[0]
