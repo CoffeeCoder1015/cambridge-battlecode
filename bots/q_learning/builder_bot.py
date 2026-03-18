@@ -1,7 +1,7 @@
 import sys
 import math
 import random
-from cambc import Controller, Direction, EntityType, Environment
+from cambc import Controller, Direction, EntityType, Environment, Position
 
 DIR_VECTORS: dict[Direction, tuple[int, int]] = {
     Direction.NORTH:     ( 0, -1),
@@ -116,19 +116,226 @@ class Builder_bot:
         self.steps_since_resample = 0
         self.target_ore_pos = None
         self.last_built_pos = None  # Tail of our conveyor chain
+        self.heading = None
+
+        # Bug2 and Advanced Tactics
+        self.navigation_mode = "EXPLORE" # EXPLORE, BUG2_NAV, BUG2_WALL
+        self.m_line_start = None
+        self.bug2_hit_point = None
+        self.bug2_closest_dist = 999999
+        self.bug2_wall_dir = 1 # 1 for right, -1 for left
+        self.sabotage_mode = False   # True after return: bot is now an attacker
+        self.has_returned = False
+        self.enemy_spotted = False   # Set when enemy buildings are first seen
+        self.enemy_direction = None  # Direction from core toward enemy cluster
+        self.enemy_core_pos = None   # Save coordinate to attack later
+        self.bug2_wall_steps = 0     # Break loops
 
     def get_orthogonal_step(self):
         dx, dy = DIR_VECTORS[self.spawn_direction]
         choices = []
-        if dx > 0: choices.append(Direction.EAST)
-        elif dx < 0: choices.append(Direction.WEST)
-        if dy > 0: choices.append(Direction.SOUTH)
-        elif dy < 0: choices.append(Direction.NORTH)
+        if dx > 0:
+            choices.append(Direction.EAST)
+        elif dx < 0:
+            choices.append(Direction.WEST)
+        if dy > 0:
+            choices.append(Direction.SOUTH)
+        elif dy < 0:
+            choices.append(Direction.NORTH)
         
         if len(choices) == 1:
             return choices[0]
         else:
             return choices[self.steps_on_heading % 2]
+
+    def _is_on_m_line(self, pos: Position) -> bool:
+        if self.m_line_start is None or self.core_pos is None:
+            return False
+        
+        x1, y1 = self.m_line_start.x, self.m_line_start.y
+        x2, y2 = self.core_pos.x, self.core_pos.y
+        x, y = pos.x, pos.y
+        
+        # Check if between points (bounding box check with small padding)
+        if not (min(x1, x2) - 1 <= x <= max(x1, x2) + 1 and min(y1, y2) - 1 <= y <= max(y1, y2) + 1):
+            return False
+            
+        # Point to line distance: Area of parallelogram / base length
+        dist = abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1)
+        length_sq = (x2 - x1)**2 + (y2 - y1)**2
+        
+        if length_sq == 0:
+            return True
+            
+        # dist / sqrt(length_sq) < tolerance => dist^2 <= tolerance^2 * length_sq
+        # A tolerance of 0.75 is good for integer grid crossings
+        if dist**2 > 0.6 * length_sq:
+            return False
+            
+        return True
+
+    def _bug2_step(self, ct: Controller):
+        my_pos = ct.get_position()
+        dist_to_core = my_pos.distance_squared(self.core_pos)
+        
+        if self.navigation_mode == "BUG2_NAV":
+            target_dir = my_pos.direction_to(self.core_pos)
+            if ct.can_move(target_dir):
+                ct.move(target_dir)
+            else:
+                # Hit a wall
+                self.navigation_mode = "BUG2_WALL"
+                self.bug2_hit_point = my_pos
+                self.bug2_closest_dist = dist_to_core
+                # Pick a wall following direction (right)
+                self.bug2_wall_dir = 1 
+                self._bug2_step(ct) # Recursive call to start wall following
+                
+        elif self.navigation_mode == "BUG2_WALL":
+            if not hasattr(self, 'bug2_heading') or self.bug2_heading is None:
+                self.bug2_heading = my_pos.direction_to(self.core_pos)
+
+            # True wall following: try to turn into the wall, then sweep away from it
+            # If wall is on the right, turn right 90 deg, then scan leftwards
+            d = self.bug2_heading.rotate_right().rotate_right() if self.bug2_wall_dir == 1 else self.bug2_heading.rotate_left().rotate_left()
+            
+            found = False
+            for _ in range(8):
+                if ct.can_move(d):
+                    ct.move(d)
+                    self.bug2_heading = d
+                    found = True
+                    break
+                d = d.rotate_left() if self.bug2_wall_dir == 1 else d.rotate_right()
+            # Check if traversing wall too long (trapped in a concave base)
+            self.bug2_wall_steps += 1
+            if self.bug2_wall_steps > 40:
+                print(f"[{ct.get_id()}] BUG2: Trapped tracing wall for 40 steps! Self-destructing to clear path.", file=sys.stderr)
+                ct.self_destruct()
+                return
+
+            if found:
+                # Check if we are back on m-line and closer than hit point
+                new_pos = ct.get_position()
+                if self._is_on_m_line(new_pos) and new_pos.distance_squared(self.core_pos) < self.bug2_closest_dist:
+                    print(f"[{ct.get_id()}] BUG2: Back on m-line, resuming NAV", file=sys.stderr)
+                    self.navigation_mode = "BUG2_NAV"
+                    self.bug2_heading = None
+                    self.bug2_wall_steps = 0
+
+    def _aggressive_sabotage(self, ct: Controller):
+        """Scan for enemy buildings. If in attack mode, move toward them and self-destruct.
+        If not yet in attack mode, record enemy direction and trigger return to core."""
+        my_pos = ct.get_position()
+        enemy_buildings = ct.get_nearby_buildings()
+        
+        best_target = None
+        max_priority = -1
+        
+        priority_map = {
+            EntityType.HARVESTER: 10,
+            EntityType.FOUNDRY: 15,
+            EntityType.CORE: 20,
+            EntityType.BREACH: 12,
+            EntityType.GUNNER: 8,
+            EntityType.CONVEYOR: 2,
+            EntityType.ROAD: 1,
+        }
+        
+        # Specifically targeting ENEMY CORE as per instructions.
+        # Other targets can be destroyed if in attack mode, but only CORE triggers the return signal.
+        for b_id in enemy_buildings:
+            if ct.get_team(b_id) != ct.get_team():
+                b_type = ct.get_entity_type(b_id)
+                b_pos = ct.get_position(b_id)
+                priority = priority_map.get(b_type, 5)
+                if b_type == EntityType.CORE:
+                    priority = 100 # Ensure core is always top priority
+                if priority > max_priority:
+                    max_priority = priority
+                    best_target = b_pos
+                elif priority == max_priority:
+                    if best_target is None or my_pos.distance_squared(b_pos) < my_pos.distance_squared(best_target):
+                        best_target = b_pos
+
+        if best_target is None:
+            return False
+
+        ct.draw_indicator_line(my_pos, best_target, 255, 0, 0)
+
+        # --- ATTACK MODE (already signaled core, now go destroy) ---
+        if self.sabotage_mode:
+            # If we returned specifically to target the core, head towards the recorded core pos
+            target_pos = self.enemy_core_pos if self.enemy_core_pos is not None else best_target
+            
+            if my_pos.distance_squared(target_pos) <= 8:
+                # 1. Destroy enemy conveyors routing into the core by self-destructing ON them
+                for b_id in ct.get_nearby_buildings(4):
+                    if ct.get_team(b_id) != ct.get_team() and ct.get_entity_type(b_id) == EntityType.CONVEYOR:
+                        b_pos = ct.get_position(b_id)
+                        if my_pos == b_pos:
+                            print(f"[{ct.get_id()}] ATTACK: Self-destructing ON enemy conveyor at {my_pos}!", file=sys.stderr)
+                            ct.self_destruct()
+                            return True
+                        else:
+                            d_to_conv = my_pos.direction_to(b_pos)
+                            if ct.can_move(d_to_conv):
+                                ct.move(d_to_conv)
+                                return True
+
+                # 2. Place a turret (Gunner) on an empty tile pointing at the core
+                # Needs 10 Titanium
+                if ct.get_global_resources()[0] >= 10:
+                    for d in DIRECTIONS:
+                        build_pos = my_pos.add(d)
+                        build_dir = build_pos.direction_to(target_pos)
+                        if ct.can_build_gunner(build_pos, build_dir):
+                            ct.build_gunner(build_pos, build_dir)
+                            print(f"[{ct.get_id()}] ATTACK: Planted Gunner at {build_pos} facing enemy core!", file=sys.stderr)
+                            return True
+
+            # Move toward target
+            move_dir = my_pos.direction_to(target_pos)
+            if ct.can_move(move_dir):
+                ct.move(move_dir)
+                return True
+            # Try rotations
+            for d in [move_dir.rotate_left(), move_dir.rotate_right(), move_dir.rotate_left().rotate_left(), move_dir.rotate_right().rotate_right()]:
+                if ct.can_move(d):
+                    ct.move(d)
+                    return True
+            return True  # Consumed the turn trying
+
+        # --- SCOUT MODE (first sighting, need to report back) ---
+        # User specified: "builder explores, builder sees ENEMY core, builder returns to home core."
+        if not self.enemy_spotted and not self.has_returned and max_priority >= 100:
+            self.enemy_spotted = True
+            self.enemy_core_pos = best_target
+            # Record direction from core to enemy for spawned attack bots
+            if self.core_pos is not None:
+                self.enemy_direction = self.core_pos.direction_to(best_target)
+            print(f"[{ct.get_id()}] ENEMY CORE SPOTTED at {best_target}! Returning to core to signal.", file=sys.stderr)
+            self.return_to_core(ct)
+            return True
+
+        return False
+
+    def _signal_core(self, ct: Controller, value: int):
+        """Place a marker near the core so it's within core vision radius."""
+        if not self.signaled_core and self.core_pos is not None:
+            # Place the marker at the core position itself (within its own vision)
+            marker_pos = ct.get_position()  # We are adjacent to core when called
+            if ct.can_place_marker(marker_pos):
+                ct.place_marker(marker_pos, value)
+                self.signaled_core = True
+                print(f"[{ct.get_id()}] SIGNAL SENT: {hex(value)} at {marker_pos}", file=sys.stderr)
+
+    def return_to_core(self, ct: 'Controller'):
+        if self.navigation_mode == "EXPLORE":
+            print(f"[{ct.get_id()}] Initiating return to core via Bug2", file=sys.stderr)
+            self.navigation_mode = "BUG2_NAV"
+            self.m_line_start = ct.get_position()
+            self.bug2_closest_dist = self.m_line_start.distance_squared(self.core_pos)
 
     def _initialize_first_round(self, ct: Controller):
         my_pos = ct.get_position()
@@ -204,6 +411,51 @@ class Builder_bot:
         my_pos = ct.get_position()
         ct.draw_indicator_dot(my_pos, 0, 0, 255)
 
+        # -1. Bug2 Navigation Intercept
+        if self.navigation_mode.startswith("BUG2"):
+            if my_pos.distance_squared(self.core_pos) <= 25:
+                # Arrived within core vision — finding marker, if not place it
+                marker_found = False
+                for e_id in ct.get_nearby_entities():
+                    try:
+                        if ct.get_entity_type(e_id) == EntityType.MARKER:
+                            if ct.get_marker_value(e_id) == 0x4452414E:
+                                marker_found = True
+                                break
+                    except Exception:
+                        pass
+                
+                if not marker_found:
+                    placed = False
+                    for check_pos in [my_pos] + ct.get_nearby_tiles(4):
+                        if ct.can_place_marker(check_pos):
+                            ct.place_marker(check_pos, 0x4452414E)
+                            print(f"[{ct.get_id()}] BUG2: Arrived at core. Marker placed at {check_pos}. Entering ATTACK mode.", file=sys.stderr)
+                            placed = True
+                            break
+                    if not placed:
+                        # We used our action tracking this or couldn't place, try next turn
+                        return
+                else:
+                    print(f"[{ct.get_id()}] BUG2: Arrived at core. Marker already exists. Entering ATTACK mode.", file=sys.stderr)
+
+                # Now become an attacker and head back to the enemy core to self destruct
+                self.navigation_mode = "EXPLORE"
+                self.has_returned = True
+                self.sabotage_mode = True  # Switch to attack mode
+                
+                # Reverse spawn direction to head back toward enemy core
+                if self.enemy_core_pos is not None:
+                    self.spawn_direction = my_pos.direction_to(self.enemy_core_pos)
+                    self._resample_heading(ct)
+                elif self.enemy_direction is not None:
+                    self.spawn_direction = self.enemy_direction
+                    self._resample_heading(ct)
+                    
+            else:
+                self._bug2_step(ct)
+            return
+
         # 0. Stuck detection (Tiered)
         # We check at the START so that early returns from tasks don't bypass counter
         if self.prev_pos is not None and self.prev_pos == my_pos:
@@ -245,46 +497,9 @@ class Builder_bot:
             self.stuck_counter = 0
         self.prev_pos = my_pos
         
-        # 0.5 Enemy Sabotage Logic
-        enemy_buildings = ct.get_nearby_buildings()
-        target_sabotage_pos = None
-        for b_id in enemy_buildings:
-            if ct.get_team(b_id) != ct.get_team():
-                b_type = ct.get_entity_type(b_id)
-                # Prioritize infrastructure that we can effectively destroy
-                if b_type in (EntityType.CONVEYOR, EntityType.ROAD, EntityType.BRIDGE, EntityType.SPLITTER, EntityType.ARMOURED_CONVEYOR):
-                    b_pos = ct.get_position(b_id)
-                    # If we are ON the enemy building, BOOM
-                    if b_pos == my_pos:
-                        print(f"[{ct.get_id()}] SABOTAGE: On enemy {b_type.value} at {b_pos}. Self-destructing!", file=sys.stderr)
-                        ct.self_destruct()
-                        return
-                    
-                    # Otherwise, prioritize the closest one
-                    if target_sabotage_pos is None:
-                        target_sabotage_pos = b_pos
-                    else:
-                        dist_new = my_pos.distance_squared(b_pos)
-                        dist_old = my_pos.distance_squared(target_sabotage_pos)
-                        if dist_new < dist_old:
-                            target_sabotage_pos = b_pos
-
-        if target_sabotage_pos is not None:
-            ct.draw_indicator_line(my_pos, target_sabotage_pos, 255, 165, 0) # Orange line for sabotage
-            ct.draw_indicator_dot(target_sabotage_pos, 255, 0, 0) # Red dot on target
-            
-            sabotage_dir = my_pos.direction_to(target_sabotage_pos)
-            if ct.get_move_cooldown() == 0:
-                # Try to move directly to the target
-                if ct.can_move(sabotage_dir):
-                    ct.move(sabotage_dir)
-                    return
-                else:
-                    # If blocked, try to rotate slightly towards it
-                    for d in [sabotage_dir.rotate_left(), sabotage_dir.rotate_right()]:
-                        if ct.can_move(d):
-                            ct.move(d)
-                            return
+        # 0.5 Aggressive Sabotage Logic (enemy detection + attack)
+        if self._aggressive_sabotage(ct):
+            return  # Sabotage handled the turn
         
         # 1. Process forced setup tasks (like elbows, chain links)
         if len(self.tasks) > 0:
