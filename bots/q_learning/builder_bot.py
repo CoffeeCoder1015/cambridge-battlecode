@@ -103,7 +103,9 @@ class Builder_bot:
         self.mode = "builder"
         self.core_pos = None
         self.spawn_direction = None
-        self.conveyor_budget = 15
+        self.conveyor_budget = 20
+        self.build_pause_timer = 0
+        self.PAUSE_DURATION = 3 # Pause for 3 rounds after building to slow down
         
         # New movement logic
         self.tasks = []
@@ -193,6 +195,10 @@ class Builder_bot:
     def run(self, ct: Controller) -> None:
         if not self.initialized:
             self._initialize_first_round(ct)
+            return
+
+        if self.build_pause_timer > 0:
+            self.build_pause_timer -= 1
             return
 
         my_pos = ct.get_position()
@@ -289,11 +295,7 @@ class Builder_bot:
                     if ct.can_build_conveyor(pos, direction):
                         ct.build_conveyor(pos, direction)
                         self.conveyor_budget -= 1
-                        if self.conveyor_budget <= 0:
-                            self.mode = "scout"
-                elif task_type == "road":
-                    if ct.can_build_road(pos):
-                        ct.build_road(pos)
+                        self.build_pause_timer = self.PAUSE_DURATION
                 self.tasks.pop(0)
             return
 
@@ -341,10 +343,8 @@ class Builder_bot:
                         # Queue a conveyor on our current tile pointing towards the harvester
                         # This links the chain to the harvester
                         link_dir = my_pos.direction_to(self.target_ore_pos)
-                        if self.mode == "builder" and self.conveyor_budget > 0:
-                            self.tasks.append(("conveyor", my_pos, link_dir))
-                        else:
-                            self.tasks.append(("road", my_pos, None))
+                        # If we see ore, we can ignore the budget to reach it
+                        self.tasks.append(("conveyor", my_pos, link_dir))
                     self.target_ore_pos = None  # Clear regardless
                 return
             else:
@@ -355,9 +355,7 @@ class Builder_bot:
         if self.target_ore_pos is not None:
             # Override heading to walk towards ore
             step_dir = my_pos.direction_to(self.target_ore_pos)
-        elif self.mode == "scout":
-            step_dir = self.spawn_direction
-        else:
+        elif self.target_ore_pos is None:
             step_dir = self.heading
         
         if self.target_ore_pos is None and self.mode == "builder" and step_dir != self.spawn_direction and dir_dot(step_dir, self.spawn_direction) != 2:
@@ -370,7 +368,7 @@ class Builder_bot:
             
             step_dir = choices[self.steps_on_heading % len(choices)] if len(choices) > 0 else step_dir
 
-        elif self.target_ore_pos is None and self.mode == "builder":
+        elif self.target_ore_pos is None:
             step_dir = self.get_orthogonal_step()
 
         # Candidate rotation loop
@@ -401,7 +399,7 @@ class Builder_bot:
                 continue
                 
             # If we need a conveyor, ensure we can actually build it before committing
-            if not ct.is_tile_passable(target_pos) and ct.get_action_cooldown() == 0 and self.mode == "builder":
+            if not ct.is_tile_passable(target_pos) and ct.get_action_cooldown() == 0:
                 build_dir = candidate.opposite()
                 if not ct.can_build_conveyor(target_pos, build_dir):
                     candidate = candidate.rotate_right()
@@ -413,19 +411,12 @@ class Builder_bot:
         ct.draw_indicator_line(my_pos, target_pos, 0, 255, 0)
         
         if not ct.is_tile_passable(target_pos):
-            if ct.get_action_cooldown() == 0:
-                if self.mode == "builder":
-                    build_dir = candidate.opposite()
-                    if ct.can_build_conveyor(target_pos, build_dir):
-                        ct.build_conveyor(target_pos, build_dir)
-                        self.conveyor_budget -= 1
-                        if self.conveyor_budget <= 0:
-                            self.mode = "scout"
-                    elif self.conveyor_budget <= 0:
-                        self.mode = "scout"
-                elif self.mode == "scout":
-                    if ct.can_build_road(target_pos):
-                        ct.build_road(target_pos)
+            if (self.target_ore_pos is not None) or (self.conveyor_budget > 0):
+                build_dir = candidate.opposite()
+                if ct.can_build_conveyor(target_pos, build_dir):
+                    ct.build_conveyor(target_pos, build_dir)
+                    self.conveyor_budget -= 1
+                    self.build_pause_timer = self.PAUSE_DURATION
             return
 
         # 3. Step forward
@@ -448,9 +439,7 @@ class Builder_bot:
         new_pos = ct.get_position()
         if my_pos != new_pos:
             pave_dir = my_pos.direction_to(new_pos)  # Points forward (we want backward)
-            if self.mode == "builder" and self.conveyor_budget > 0:
+            if (self.target_ore_pos is not None) or (self.conveyor_budget > 0):
                 # Build conveyor pointing backwards (towards core)
                 self.vacated_task = ("conveyor", my_pos, pave_dir.opposite())
-            elif self.mode == "scout":
-                self.vacated_task = ("road", my_pos, None)
             self.last_built_pos = my_pos
