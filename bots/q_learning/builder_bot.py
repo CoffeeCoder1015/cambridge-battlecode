@@ -49,41 +49,51 @@ def reflect_direction(heading: Direction, ct: 'Controller', my_pos) -> Direction
     then flips the blocked component of the heading vector."""
     hx, hy = DIR_VECTORS[heading]
     
-    # Probe X/Y components: only mark as blocked if there is a PERMANENT obstruction
+    # We probe the cardinal directions (axes) to find the wall normal.
+    # If moving diagonally (1, -1), we check East (1, 0) and North (0, -1).
     x_blocked = False
     y_blocked = False
     
-    if hx != 0:
-        x_probe = my_pos.add(vec_to_dir(hx, 0))
+    def is_static_block(pos):
         try:
-            env = ct.get_tile_env(x_probe)
+            env = ct.get_tile_env(pos)
             if env in (Environment.WALL, Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
-                x_blocked = True
-            elif ct.get_tile_building_id(x_probe) is not None:
-                x_blocked = True # Blocked by building
-            # If it's EMPTY or has a bot, we don't treat it as a hard 'wall' for bouncing
+                return True
+            if ct.get_tile_building_id(pos) is not None:
+                # Friendly buildings (like conveyors) are passable, but if we are STUCK 
+                # and probing, we consider them potentially part of the 'wall' 
+                # if they aren't helping us progress. For now, only hard walls.
+                return True
         except Exception:
-            x_blocked = True # Map edge
+            return True # Map edge
+        return False
+
+    if hx != 0:
+        if is_static_block(my_pos.add(vec_to_dir(hx, 0))):
+            x_blocked = True
     
     if hy != 0:
-        y_probe = my_pos.add(vec_to_dir(0, hy))
-        try:
-            env = ct.get_tile_env(y_probe)
-            if env in (Environment.WALL, Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
-                y_blocked = True
-            elif ct.get_tile_building_id(y_probe) is not None:
-                y_blocked = True
-        except Exception:
+        if is_static_block(my_pos.add(vec_to_dir(0, hy))):
+            y_blocked = True
+            
+    # If it's a 45 degree movement and we hit a 'corner' (neither axis was clearly blocked 
+    # but the diagonal was), we need to decide which axis to flip. 
+    if not x_blocked and not y_blocked:
+        # Check the actual diagonal we tried to move to
+        if is_static_block(my_pos.add(heading)):
+            # If front-diagonal is blocked, but cardinals aren't, 
+            # we might be hitting a thin corner. Flip both (retroreflection).
+            x_blocked = True
             y_blocked = True
     
     # Reflect blocked components
     rx = -hx if x_blocked else hx
     ry = -hy if y_blocked else hy
     
-    # If nothing was detected as specifically blocked but we are stuck, flip everything
-    if not x_blocked and not y_blocked:
+    # Final fallback: if we are still going the same way, just invert (shouldn't happen if blocked)
+    if rx == hx and ry == hy:
         rx, ry = -hx, -hy
-    
+        
     return vec_to_dir(rx, ry)
 
 class Builder_bot:
@@ -194,13 +204,13 @@ class Builder_bot:
             # ONLY increment if we are not on cooldown (if we are on cooldown, we aren't 'stuck', just waiting)
             if ct.get_move_cooldown() == 0 and ct.get_action_cooldown() == 0:
                 self.stuck_counter += 1
-                if self.stuck_counter >= 15: # Hard bounce
+                if self.stuck_counter >= 5: # Hard bounce (USER requested 5)
                     new_dir = reflect_direction(self.spawn_direction, ct, my_pos)
                     print(f"[{ct.get_id()}] BOUNCE: {self.spawn_direction.name} -> {new_dir.name}", file=sys.stderr)
                     self.spawn_direction = new_dir
-                    self._resample_heading(ct)
                     self.stuck_counter = 0
-                elif self.stuck_counter >= 7: # Soft resample
+                    self._resample_heading(ct)
+                elif self.stuck_counter >= 3: # Soft resample
                     self.steps_on_heading += 1
                     self._resample_heading(ct)
         else:
@@ -399,8 +409,8 @@ class Builder_bot:
         # 3. Step forward
         if ct.get_move_cooldown() == 0:
             if ct.can_move(candidate):
-                old_pos = ct.get_position()
                 ct.move(candidate)
+                self.stuck_counter = 0 # Reset on successful move
                 self.steps_on_heading += 1
                 self.steps_since_resample -= 1
                 
