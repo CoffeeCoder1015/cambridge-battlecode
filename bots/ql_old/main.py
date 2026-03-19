@@ -15,17 +15,15 @@ from cambc import Controller, EntityType
 
 from core import Core
 from builder_bot import Builder_bot
-from gunner import Gunner
 
 mapping = {
     EntityType.CORE: Core,
-    EntityType.BUILDER_BOT: Builder_bot,
-    EntityType.GUNNER: Gunner
+    EntityType.BUILDER_BOT: Builder_bot
 }
 
 class Player:
     def __init__(self):
-        self.active:Core | Builder_bot | Gunner = None
+        self.active:Core | Builder_bot = None
 
     def run(self, ct: Controller) -> None:
         etype = ct.get_entity_type()
