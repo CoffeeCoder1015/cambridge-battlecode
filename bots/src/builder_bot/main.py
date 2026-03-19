@@ -5,7 +5,6 @@ from cambc import Controller, Direction
 
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 
-
 def run(ct: Controller) -> None:
     for d in Direction:
         check_pos = ct.get_position().add(d)
@@ -20,6 +19,6 @@ def run(ct: Controller) -> None:
     if ct.can_move(move_dir):
         ct.move(move_dir)
 
-    marker_pos = ct.get_position().add(random.choice(DIRECTIONS))
-    if ct.can_place_marker(marker_pos):
-        ct.place_marker(marker_pos, ct.get_current_round())
+    # marker_pos = ct.get_position().add(random.choice(DIRECTIONS))
+    # if ct.can_place_marker(marker_pos):
+    #     ct.place_marker(marker_pos, ct.get_current_round())

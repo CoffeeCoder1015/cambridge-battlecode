@@ -10,21 +10,24 @@ This bot:
     a marker recording the current round number
 """
 
-import random
 
-from cambc import Controller, Direction, EntityType, Environment, Position
+from cambc import Controller, EntityType
 
-import core
-import builder_bot
+from core.main import Core
+from builder_bot.main import Builder_bot
 
+mapping = {
+    EntityType.CORE: Core,
+    EntityType.BUILDER_BOT: Builder_bot,
+}
 
 class Player:
     def __init__(self):
-        self.num_spawned = 0
+        self.active:Core | Builder_bot = None
 
     def run(self, ct: Controller) -> None:
         etype = ct.get_entity_type()
-        if etype == EntityType.CORE:
-            core.run(ct, self)
-        elif etype == EntityType.BUILDER_BOT:
-            builder_bot.run(ct)
+        if self.active is None:
+            self.active = mapping[etype]()
+
+        self.active.run(ct)
