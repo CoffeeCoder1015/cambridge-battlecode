@@ -1,11 +1,12 @@
 import sys
 
 from collections import deque
-from cambc import Controller, Direction
+from cambc import Controller, Direction, EntityType, Position
 
 DIRECTIONS = [
     Direction.NORTH, Direction.NORTHEAST, Direction.EAST, Direction.SOUTHEAST,
-    Direction.SOUTH, Direction.SOUTHWEST, Direction.WEST, Direction.NORTHWEST
+    Direction.SOUTH, Direction.SOUTHWEST, Direction.WEST, Direction.NORTHWEST,
+    Direction.CENTRE
 ]
 
 class Core:
@@ -31,6 +32,8 @@ class Core:
         self.drain_wave_active = False
         self.drain_wave_rounds_left = 0
         self.DRAIN_WAVE_DURATION = 20  # Spawn every round for 20 rounds
+        self.enemy_core_pos = None     # Targeted for directional spawning
+        self.CORE_MARKER_MAGIC = 0xCAFE
 
     def run(self, ct: Controller):
         res = ct.get_global_resources()
@@ -77,6 +80,22 @@ class Core:
         self.reserve_buffer = max(self.reserve_buffer, min_reserve)
 
         self.last_titanium = titanium
+
+        # 0.7 Marker Detection (Drain Wave Activation)
+        if not self.drain_wave_active and ct.get_action_cooldown() == 0:
+            for m_id in ct.get_nearby_buildings():
+                if ct.get_entity_type(m_id) == EntityType.MARKER:
+                    val = ct.get_marker_value(m_id)
+                    if (val >> 16) == self.CORE_MARKER_MAGIC:
+                        # Extract core position from marker: magic(16) | x(8) | y(8)
+                        target_x = (val >> 8) & 0xFF
+                        target_y = val & 0xFF
+                        self.enemy_core_pos = Position(target_x, target_y)
+                        self.drain_wave_active = True
+                        self.drain_wave_rounds_left = self.DRAIN_WAVE_DURATION
+                        print(f"[CORE] DRAIN WAVE ACTIVATED! Enemy Core at {self.enemy_core_pos}. "
+                              f"Aggressive spawning for {self.DRAIN_WAVE_DURATION} rounds.", file=sys.stderr)
+                        break
 
         if ct.get_action_cooldown() == 0:
             # DRAIN WAVE: Aggressive spawning — one bot every round
@@ -138,13 +157,23 @@ class Core:
                 self.reinvestment_budget -= current_deployment_cost
 
     def _spawn(self, ct: Controller):
-        pair_idx = (self.spawned // 2) % 4
-        sub_idx = self.spawned % 2
-        preferred_d_idx = self.pairs[pair_idx][sub_idx]
+        # 1. Determine base preferred direction index
+        if self.enemy_core_pos is not None:
+            # Prioritize spawning TOWARD the enemy core
+            pref_d = ct.get_position().direction_to(self.enemy_core_pos)
+            # Find index in DIRECTIONS (CENTRE is at index 8)
+            try:
+                preferred_d_idx = DIRECTIONS.index(pref_d)
+            except ValueError:
+                preferred_d_idx = 0
+        else:
+            pair_idx = (self.spawned // 2) % 4
+            sub_idx = self.spawned % 2
+            preferred_d_idx = self.pairs[pair_idx][sub_idx]
             
-        # Try preferred direction first, then scan all 8 to avoid getting entombed
-        for offset in range(8):
-            d_idx = (preferred_d_idx + offset) % 8
+        # 2. Try preferred direction first, then scan all 9 (including CENTRE)
+        for offset in range(9):
+            d_idx = (preferred_d_idx + offset) % 9
             d = DIRECTIONS[d_idx]
             spawn_pos = ct.get_position().add(d)
             

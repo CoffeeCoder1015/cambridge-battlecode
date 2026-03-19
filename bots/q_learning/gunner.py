@@ -26,25 +26,40 @@ class Gunner:
             return
             
         my_team = ct.get_team()
+        
+        # 1. Eager check: what's directly in our line of fire?
+        # Gunners have a fixed direction and a get_gunner_target() method.
+        target_pos = ct.get_gunner_target()
+        if target_pos is not None:
+            # can_fire already checks team, line of sight, and ammo
+            if ct.can_fire(target_pos):
+                print(f"[Gunner {ct.get_id()}] EAGER: Firing at {target_pos} in line of sight.", file=sys.stderr)
+                ct.fire(target_pos)
+                return
+            else:
+                # Debug why we aren't firing at a target in our path
+                ammo = ct.get_ammo_amount()
+                if ammo < 2:
+                    print(f"[Gunner {ct.get_id()}] LOW AMMO: Target at {target_pos} spotted, but ammo is {ammo}", file=sys.stderr)
+        
+        # 2. General scan (fallback for nearby targets slightly off the center line)
         best_target = None
         best_priority = -1
         
-        # Combine units and buildings for targeting
         targets = ct.get_nearby_units() + ct.get_nearby_buildings()
         
         for t_id in targets:
-            # Check team
             if ct.get_team(t_id) != my_team:
                 e_type = ct.get_entity_type(t_id)
                 priority = self.priority_map.get(e_type, 5)
                 
                 pos = ct.get_position(t_id)
                 
-                # Check if we can legally fire at this position
                 if ct.can_fire(pos):
                     if priority > best_priority:
                         best_priority = priority
                         best_target = pos
                         
         if best_target is not None:
+            print(f"[Gunner {ct.get_id()}] SCAN: Firing at {best_target} (priority {best_priority})", file=sys.stderr)
             ct.fire(best_target)

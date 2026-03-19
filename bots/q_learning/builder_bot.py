@@ -34,21 +34,18 @@ def get_core_boundary(core_pos: Position, map_w: int, map_h: int) -> list[Positi
     
     return [p for p in candidates if 0 <= p.x < map_w and 0 <= p.y < map_h]
 
-def has_incoming_titanium(ct: Controller, build_pos: Position, enemy_team: int) -> bool:
-    """Check if any adjacent enemy conveyor flows directly into this build position and holds titanium."""
+def has_incoming_titanium(ct: Controller, build_pos: Position) -> bool:
+    """Check if any adjacent conveyor (any team) flows directly into this build position and holds titanium."""
     for d in DIRECTIONS:
         adj_pos = build_pos.add(d)
         try:
             b_id = ct.get_tile_building_id(adj_pos)
-            if b_id is not None and ct.get_team(b_id) == enemy_team:
+            if b_id is not None:
                 b_type = ct.get_entity_type(b_id)
                 if b_type in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
                     # Conveyor at adj_pos must be pointing to build_pos, which is d.opposite()
                     if ct.get_direction(b_id) == d.opposite():
-                        # Armoured conveyors are high-value and usually carry resources.
-                        # Standard conveyors must be observed carrying titanium.
-                        if b_type == EntityType.ARMOURED_CONVEYOR:
-                            return True
+                        # Check for titanium
                         if ct.get_stored_resource(b_id) == ResourceType.TITANIUM:
                             return True
         except Exception:
@@ -395,56 +392,156 @@ class Builder_bot:
             map_w, map_h = ct.get_map_width(), ct.get_map_height()
             boundary = get_core_boundary(target_pos, map_w, map_h)
 
-            # --- MVP 1.1: Core Hugging (Self-destruct when close to core) ---
+
+            # --- MVP 2: Enemy-side turret placement (on boundary) ---
+            # Priority 1: Clear and build turrets on the 16 core-adjacent tiles.
+            if dist_sq_to_core <= 15:
+                for b_tile in boundary:
+                    if my_pos.distance_squared(b_tile) <= 2:
+                        if ct.is_tile_empty(b_tile) or b_tile == my_pos:
+                            # [FIX 6] Only build Gunner if it has incoming titanium!
+                            if has_incoming_titanium(ct, b_tile):
+                                gunner_cost = ct.get_gunner_cost()[0]
+                                if ct.get_global_resources()[0] >= gunner_cost and ct.get_action_cooldown() == 0:
+                                    build_dir = b_tile.direction_to(target_pos)
+                                    if ct.can_build_gunner(b_tile, build_dir):
+                                        ct.build_gunner(b_tile, build_dir)
+                                        print(f"[{ct.get_id()}] MVP2: PLACED GUNNER at {b_tile}!", file=sys.stderr)
+                                        # Move AWAY immediately to make space for more
+                                        away_dir = build_dir.opposite()
+                                        if ct.can_move(away_dir):
+                                            ct.move(away_dir)
+                                        return True
+                            else:
+                                # [FIX 6] Not powered? Let MVP 3 bridge it!
+                                # Continue to Greedy Linker logic below
+                                pass
+
+            # --- MVP 3: Active Siege Logistics (Greedy Linker) ---
+            # Priority 2: Form multi-tile supply chains to unpowered turrets.
+            unpowered_turrets = []
+            nearby_b = ct.get_nearby_buildings()
+            for b_id in nearby_b:
+                if ct.get_team(b_id) == my_team and ct.get_entity_type(b_id) == EntityType.GUNNER:
+                    b_p = ct.get_position(b_id)
+                    if not has_incoming_titanium(ct, b_p):
+                        unpowered_turrets.append(b_p)
+
+            target_tiles = list(unpowered_turrets) # Use list to avoid modifying the same ref
+            if not target_tiles:
+                # [FIX 7] Catch-22: Supply the boundary FIRST
+                for b_tile in boundary:
+                    try:
+                        if ct.is_tile_empty(b_tile) and ct.get_global_resources()[0] >= 10:
+                            target_tiles.append(b_tile)
+                    except GameError:
+                        pass
+            
+            if target_tiles:
+                # Find the best tile to feed and the best source to pull from
+                best_t = min(target_tiles, key=lambda p: my_pos.distance_squared(p))
+                
+                # Scan for sources in a 36-tile radius (Core vision)
+                source_pos = None
+                for b_id in nearby_b:
+                    try:
+                        b_p = ct.get_position(b_id)
+                        b_type = ct.get_entity_type(b_id)
+                        if b_type in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR, EntityType.HARVESTER):
+                            # Prioritize sources that ALREADY have titanium
+                            if ct.get_stored_resource(b_id) == ResourceType.TITANIUM:
+                                source_pos = b_p
+                                break # Found a perfect source
+                            elif source_pos is None:
+                                source_pos = b_p # Potential source
+                    except Exception:
+                        pass
+                
+                
+                if source_pos is not None:
+                    # If we are adjacent to the turret, build into it!
+                    dist_to_turret = my_pos.distance_squared(best_t)
+                    if dist_to_turret <= 2:
+                        bridge_dir = my_pos.direction_to(best_t)
+                        if ct.can_build_conveyor(my_pos, bridge_dir):
+                            ct.build_conveyor(my_pos, bridge_dir)
+                            print(f"[{ct.get_id()}] MVP3: LINK - Feeding turret at {best_t}", file=sys.stderr)
+                            # Move away (perpendicular or back) to make room for others
+                            away_dir = bridge_dir.rotate_left().rotate_left() 
+                            if ct.can_move(away_dir):
+                                ct.move(away_dir)
+                            return True
+                    
+                    # If we are between source and turret, move to fill the gap
+                    elif dist_to_turret <= 36:
+                        # Move toward the turret to form the next link
+                        move_dir = my_pos.direction_to(best_t)
+                        if ct.can_move(move_dir):
+                            ct.move(move_dir)
+                            return True
+
+            # --- MVP 1.1: Core Hugging (Self-destruct as LAST RESORT) ---
             try:
                 curr_b_id = ct.get_tile_building_id(my_pos)
                 if curr_b_id is not None:
                     b_team = ct.get_team(curr_b_id)
                     curr_type = ct.get_entity_type(curr_b_id)
                     if b_team == enemy_team and curr_type in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR, EntityType.ROAD):
-                        # dist_sq <= 8 covers the 3x3 core area and adjacent tiles
                         if dist_sq_to_core <= 8:
-                            print(f"[{ct.get_id()}] MVP1.1: HUGGING CORE - SELF DESTRUCT on {curr_type.value} at {my_pos}! (distSq={dist_sq_to_core})", file=sys.stderr)
+                            print(f"[{ct.get_id()}] MVP1.1: LAST RESORT - Sabotaging {curr_type.value} at {my_pos}!", file=sys.stderr)
                             ct.self_destruct()
                             return True
             except GameError:
                 pass
 
-            # --- MVP 2: Enemy-side turret placement (on boundary) ---
-            # If the bot is adjacent to an empty boundary tile, try to plant a turret there.
-            if dist_sq_to_core <= 13: # gunner vision/range roughly.
-                for b_tile in boundary:
-                    if my_pos.distance_squared(b_tile) <= 2:
-                        if ct.is_tile_empty(b_tile) or b_tile == my_pos:
-                            gunner_cost = ct.get_gunner_cost()[0]
-                            if ct.get_global_resources()[0] >= gunner_cost and ct.get_action_cooldown() == 0:
-                                # face the core center
-                                build_dir = b_tile.direction_to(target_pos) # core center
-                                if ct.can_build_gunner(b_tile, build_dir):
-                                    ct.build_gunner(b_tile, build_dir)
-                                    print(f"[{ct.get_id()}] MVP2: PLACED GUNNER on cleared boundary at {b_tile}!", file=sys.stderr)
-                                    return True
-
-            # --- NAVIGATION: Move closer to the core boundary so MVP1.1 can trigger ---
-            best_b_tile = min(boundary, key=lambda p: my_pos.distance_squared(p))
-            
-            # If we are already on a boundary tile but not one with an enemy structure to clear, 
-            # we check if any neighbor boundary tiles have something to clear.
+            # --- MVP 2.3: Congestion Relief (The 'Backoff' Role) ---
+            # Priority 3: If on or near the boundary but idle, move out to 3+ tiles distance.
             on_boundary = my_pos in boundary
             if on_boundary:
-                for b_tile in boundary:
-                    if my_pos.distance_squared(b_tile) <= 2:
-                        try:
-                            occ_id = ct.get_tile_building_id(b_tile)
-                            if occ_id is not None and ct.get_team(occ_id) == enemy_team:
-                                # It's a structure tile to clear. Move there if possible.
-                                move_dir = my_pos.direction_to(b_tile)
-                                if ct.can_move(move_dir):
-                                    ct.move(move_dir)
+                # If we're not building or sabotaging, get out of the way!
+                escape_dir = my_pos.direction_to(target_pos).opposite()
+                if ct.can_move(escape_dir):
+                    ct.move(escape_dir)
+                    return True
+                else:
+                    # Random wiggle to avoid gridlock
+                    wiggle = random.choice([escape_dir.rotate_left(), escape_dir.rotate_right()])
+                    if ct.can_move(wiggle):
+                        ct.move(wiggle)
+                        return True
+            
+            # --- MVP 2.2: Invasive Sabotage (Clearing Path for Feeders) ---
+            # Blow up any enemy conveyor that blocks a potential feeder path.
+            if dist_sq_to_core <= 40:
+                for d in DIRECTIONS:
+                    check_pos = my_pos.add(d)
+                    try:
+                        b_id = ct.get_tile_building_id(check_pos)
+                        if b_id is not None and ct.get_team(b_id) == enemy_team:
+                            if ct.get_stored_resource(b_id) == ResourceType.TITANIUM:
+                                if my_pos == check_pos:
+                                    ct.self_destruct()
                                     return True
-                        except Exception:
-                            pass
+                                elif ct.can_move(d):
+                                    ct.move(d)
+                                    return True
+                    except Exception:
+                        pass
 
+            # --- NAVIGATION: Approach with patience if blocked ---
+            on_boundary = my_pos in boundary
+            best_b_tile = min(boundary, key=lambda p: my_pos.distance_squared(p))
+            # Don't swarm too tightly if already lots of bots are there
+            if not on_boundary and dist_sq_to_core <= 20:
+                # Count nearby allies
+                allies_near = 0
+                for a_id in ct.get_nearby_units():
+                    if ct.get_team(a_id) == my_team:
+                        allies_near += 1
+                if allies_near > 5:
+                    # Too crowded, wait here as a reserve
+                    return True
+            # --- APPROACH: Move closer to the core boundary ---
             move_dir = my_pos.direction_to(best_b_tile)
             potential_moves = [move_dir, move_dir.rotate_left(), move_dir.rotate_right()]
             
@@ -530,14 +627,13 @@ class Builder_bot:
                 if b_type in (EntityType.HARVESTER, EntityType.FOUNDRY, EntityType.CORE,
                               EntityType.GUNNER, EntityType.SENTINEL, EntityType.BREACH):
                     b_pos = ct.get_position(b_id)
-                    enemy_team = ct.get_team(b_id)
                     if my_pos.distance_squared(b_pos) <= 13:
                         for d in DIRECTIONS:
                             build_pos = my_pos.add(d)
                             dist_to_target = build_pos.distance_squared(b_pos)
                             if 2 < dist_to_target <= 8:
                                 # Pre-check: is there titanium flowing directly into THIS build tile?
-                                if has_incoming_titanium(ct, build_pos, enemy_team):
+                                if has_incoming_titanium(ct, build_pos):
                                     build_dir = build_pos.direction_to(b_pos)
                                     if ct.can_build_gunner(build_pos, build_dir):
                                         ct.build_gunner(build_pos, build_dir)
@@ -730,19 +826,6 @@ class Builder_bot:
                         ct.build_conveyor(pos, direction)
                         self.conveyor_budget -= 1
                     self.tasks.pop(0)
-                elif task_type == "defensive_gunner":
-                    pos, direction, harv_pos = task[1], task[2], task[3]
-                    if harv_pos not in self.harvesters_defended:
-                        if ct.can_build_gunner(pos, direction):
-                            ct.build_gunner(pos, direction)
-                            self.harvesters_defended.add(harv_pos)
-                            print(f"[{ct.get_id()}] DEFENSE: Built turret at {pos} defending harvester at {harv_pos}", file=sys.stderr)
-                    self.tasks.pop(0)
-                elif task_type == "move":
-                    direction = task[1]
-                    if ct.can_move(direction):
-                        ct.move(direction)
-                    self.tasks.pop(0)
                 else:
                     self.tasks.pop(0)  # Unknown task, discard
             return # Always return if tasks are pending
@@ -789,29 +872,14 @@ class Builder_bot:
                         ct.build_harvester(self.target_ore_pos)
                         print(f"[{ct.get_id()}] Placed harvester at {self.target_ore_pos}", file=sys.stderr)
                         # Queue defensive turret (1 per harvester)
-                        if self.target_ore_pos not in self.harvesters_defended:
-                            # Pick a gunner position: 1 tile opposite of the harvester from us
-                            aim_dir = my_pos.direction_to(self.target_ore_pos).opposite()
-                            gunner_pos = my_pos.add(aim_dir)
-                            gunner_dir = gunner_pos.direction_to(self.target_ore_pos) # face toward ore/threat
-
-                            # Move away immediately so we can build a conveyor at our current tile
-                            if ct.can_move(aim_dir):
-                                ct.move(aim_dir)
-                                # Next round, build the link conveyor at the tile we just vacated (now at pos-aim_dir)
-                                # And then build the gunner.
-                                self.tasks.append(("conveyor", my_pos, aim_dir))
-                                self.tasks.append(("defensive_gunner", gunner_pos, gunner_dir, self.target_ore_pos))
-                            else:
-                                # Fallback if blocked: just try building outward
-                                self.tasks.append(("conveyor", my_pos, aim_dir))
-                                self.tasks.append(("defensive_gunner", gunner_pos, gunner_dir, self.target_ore_pos))
+                        # Link harvester to the network via conveyor
+                        link_dir = my_pos.direction_to(self.target_ore_pos).opposite()
+                        if ct.can_move(link_dir):
+                            ct.move(link_dir)
+                            self.tasks.append(("conveyor", my_pos, link_dir))
                         else:
-                            # Already defended, just output link
-                            link_dir = my_pos.direction_to(self.target_ore_pos).opposite()
-                            if ct.can_move(link_dir):
-                                ct.move(link_dir)
-                                self.tasks.append(("conveyor", my_pos, link_dir))
+                            # Fallback if blocked
+                            self.tasks.append(("conveyor", my_pos, link_dir))
                             
                         self.target_ore_pos = None
                     # else: Can't afford — wait here patiently, don't abandon
