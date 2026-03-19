@@ -16,14 +16,21 @@ def compute_symmetry_candidates(core_pos: Position, map_w: int, map_h: int) -> l
     ]
 
 def get_core_boundary(core_pos: Position, map_w: int, map_h: int) -> list[Position]:
-    """Return the 12 tiles cardinally adjacent to a 3x3 core, filtered by map bounds."""
+    """Return the 16 tiles adjacent (cardinal+diagonal) to a 3x3 core centered at core_pos, filtered by map bounds."""
     x, y = core_pos.x, core_pos.y
     candidates = []
-    for i in range(3):
-        candidates.append(Position(x + i, y - 1))  # North
-        candidates.append(Position(x + i, y + 3))  # South
-        candidates.append(Position(x - 1, y + i))  # West
-        candidates.append(Position(x + 3, y + i))  # East
+    # Around the 3x3 (x-1..x+1, y-1..y+1), the boundary is at x-2, x+2, y-2, y+2
+    for i in range(-1, 2):
+        candidates.append(Position(x + i, y - 2))  # North (x-1, x, x+1)
+        candidates.append(Position(x + i, y + 2))  # South
+        candidates.append(Position(x - 2, y + i))  # West
+        candidates.append(Position(x + 2, y + i))  # East
+
+    # Plus the 4 diagonal corner adjacent tiles
+    candidates.append(Position(x - 2, y - 2))
+    candidates.append(Position(x + 2, y - 2))
+    candidates.append(Position(x - 2, y + 2))
+    candidates.append(Position(x + 2, y + 2))
     
     return [p for p in candidates if 0 <= p.x < map_w and 0 <= p.y < map_h]
 
@@ -385,32 +392,77 @@ class Builder_bot:
             ct.draw_indicator_line(my_pos, target_pos, 255, 0, 0)
             dist_sq_to_core = my_pos.distance_squared(target_pos)
 
-            # --- MVP 1: Am I standing on an enemy conveyor near the core? SELF DESTRUCT. ---
+            map_w, map_h = ct.get_map_width(), ct.get_map_height()
+            boundary = get_core_boundary(target_pos, map_w, map_h)
+
+            # --- MVP 1.1: Core Hugging (Self-destruct when close to core) ---
             try:
                 curr_b_id = ct.get_tile_building_id(my_pos)
                 if curr_b_id is not None:
                     b_team = ct.get_team(curr_b_id)
                     curr_type = ct.get_entity_type(curr_b_id)
-                    print(f"[{ct.get_id()}] MVP1 check: bldg={curr_type.value} team={b_team} vs enemy={enemy_team} distSq={dist_sq_to_core}", file=sys.stderr)
                     if b_team == enemy_team and curr_type in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR, EntityType.ROAD):
-                        if dist_sq_to_core <= 50:
-                            print(f"[{ct.get_id()}] MVP1: SELF DESTRUCT on {curr_type.value} at {my_pos}!", file=sys.stderr)
+                        # dist_sq <= 8 covers the 3x3 core area and adjacent tiles
+                        if dist_sq_to_core <= 8:
+                            print(f"[{ct.get_id()}] MVP1.1: HUGGING CORE - SELF DESTRUCT on {curr_type.value} at {my_pos}! (distSq={dist_sq_to_core})", file=sys.stderr)
                             ct.self_destruct()
                             return True
             except GameError:
                 pass
 
-            # Move closer to the core so MVP1 can trigger
-            map_w, map_h = ct.get_map_width(), ct.get_map_height()
-            boundary = get_core_boundary(target_pos, map_w, map_h)
+            # --- MVP 2: Enemy-side turret placement (on boundary) ---
+            # If the bot is adjacent to an empty boundary tile, try to plant a turret there.
+            if dist_sq_to_core <= 13: # gunner vision/range roughly.
+                for b_tile in boundary:
+                    if my_pos.distance_squared(b_tile) <= 2:
+                        if ct.is_tile_empty(b_tile) or b_tile == my_pos:
+                            gunner_cost = ct.get_gunner_cost()[0]
+                            if ct.get_global_resources()[0] >= gunner_cost and ct.get_action_cooldown() == 0:
+                                # face the core center
+                                build_dir = b_tile.direction_to(target_pos) # core center
+                                if ct.can_build_gunner(b_tile, build_dir):
+                                    ct.build_gunner(b_tile, build_dir)
+                                    print(f"[{ct.get_id()}] MVP2: PLACED GUNNER on cleared boundary at {b_tile}!", file=sys.stderr)
+                                    return True
+
+            # --- NAVIGATION: Move closer to the core boundary so MVP1.1 can trigger ---
             best_b_tile = min(boundary, key=lambda p: my_pos.distance_squared(p))
-            for d in [my_pos.direction_to(best_b_tile),
-                      my_pos.direction_to(best_b_tile).rotate_left(),
-                      my_pos.direction_to(best_b_tile).rotate_right()]:
+            
+            # If we are already on a boundary tile but not one with an enemy structure to clear, 
+            # we check if any neighbor boundary tiles have something to clear.
+            on_boundary = my_pos in boundary
+            if on_boundary:
+                for b_tile in boundary:
+                    if my_pos.distance_squared(b_tile) <= 2:
+                        try:
+                            occ_id = ct.get_tile_building_id(b_tile)
+                            if occ_id is not None and ct.get_team(occ_id) == enemy_team:
+                                # It's a structure tile to clear. Move there if possible.
+                                move_dir = my_pos.direction_to(b_tile)
+                                if ct.can_move(move_dir):
+                                    ct.move(move_dir)
+                                    return True
+                        except Exception:
+                            pass
+
+            move_dir = my_pos.direction_to(best_b_tile)
+            potential_moves = [move_dir, move_dir.rotate_left(), move_dir.rotate_right()]
+            
+            # Try to move into the BEST boundary tile
+            for d in potential_moves:
                 if ct.can_move(d):
                     ct.move(d)
                     return True
-            return True
+            
+            # If blocked, try to move toward ANY boundary tile
+            for b_tile in boundary:
+                if my_pos.distance_squared(b_tile) <= 2:
+                    d = my_pos.direction_to(b_tile)
+                    if ct.can_move(d):
+                        ct.move(d)
+                        return True
+
+            return True  # Terminate turn if near core and active
 
         # No confirmed core yet — cycle through symmetry candidates
         if self.current_candidate_idx >= len(self.symmetry_candidates):
@@ -428,7 +480,7 @@ class Builder_bot:
             return False
 
         candidate_pos = self.symmetry_candidates[self.current_candidate_idx]
-        ct.draw_indicator_line(my_pos, candidate_pos, 255, 128, 0)  # Orange line to candidate
+
 
         dist_sq = my_pos.distance_squared(candidate_pos)
 
@@ -669,9 +721,9 @@ class Builder_bot:
         
         # 1. Process forced setup tasks (like elbows, chain links, defensive turrets)
         if len(self.tasks) > 0:
-            task = self.tasks[0]
-            task_type = task[0]
             if ct.get_action_cooldown() == 0:
+                task = self.tasks[0]
+                task_type = task[0]
                 if task_type == "conveyor":
                     pos, direction = task[1], task[2]
                     if ct.can_build_conveyor(pos, direction):
@@ -686,9 +738,14 @@ class Builder_bot:
                             self.harvesters_defended.add(harv_pos)
                             print(f"[{ct.get_id()}] DEFENSE: Built turret at {pos} defending harvester at {harv_pos}", file=sys.stderr)
                     self.tasks.pop(0)
+                elif task_type == "move":
+                    direction = task[1]
+                    if ct.can_move(direction):
+                        ct.move(direction)
+                    self.tasks.pop(0)
                 else:
                     self.tasks.pop(0)  # Unknown task, discard
-            return
+            return # Always return if tasks are pending
 
         # 1.5 Ore scanning — look for ore tiles in vision
         if self.target_ore_pos is None:
@@ -736,15 +793,25 @@ class Builder_bot:
                             # Pick a gunner position: 1 tile opposite of the harvester from us
                             aim_dir = my_pos.direction_to(self.target_ore_pos).opposite()
                             gunner_pos = my_pos.add(aim_dir)
-                            
-                            # Build conveyor at my_pos holding ore, facing gunner_pos
-                            self.tasks.append(("conveyor", my_pos, aim_dir))
-                            # Build Gunner at gunner_pos, facing aim_dir (outward)
-                            self.tasks.append(("defensive_gunner", gunner_pos, aim_dir, self.target_ore_pos))
+                            gunner_dir = gunner_pos.direction_to(self.target_ore_pos) # face toward ore/threat
+
+                            # Move away immediately so we can build a conveyor at our current tile
+                            if ct.can_move(aim_dir):
+                                ct.move(aim_dir)
+                                # Next round, build the link conveyor at the tile we just vacated (now at pos-aim_dir)
+                                # And then build the gunner.
+                                self.tasks.append(("conveyor", my_pos, aim_dir))
+                                self.tasks.append(("defensive_gunner", gunner_pos, gunner_dir, self.target_ore_pos))
+                            else:
+                                # Fallback if blocked: just try building outward
+                                self.tasks.append(("conveyor", my_pos, aim_dir))
+                                self.tasks.append(("defensive_gunner", gunner_pos, gunner_dir, self.target_ore_pos))
                         else:
-                            # Legacy behavior for already-defended harvesters
+                            # Already defended, just output link
                             link_dir = my_pos.direction_to(self.target_ore_pos).opposite()
-                            self.tasks.append(("conveyor", my_pos, link_dir))
+                            if ct.can_move(link_dir):
+                                ct.move(link_dir)
+                                self.tasks.append(("conveyor", my_pos, link_dir))
                             
                         self.target_ore_pos = None
                     # else: Can't afford — wait here patiently, don't abandon
