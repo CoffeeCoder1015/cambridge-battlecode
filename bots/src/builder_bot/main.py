@@ -1,8 +1,9 @@
 from cambc import Controller, Direction, EntityType
 from .TerrainMemory import SymmetryAnalyzer
-from .Pathing import BugNav2
+from .PropogateSymmetry import SignalPropagator
 
 import sys
+import random
 
 
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
@@ -11,35 +12,27 @@ DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 class BuilderBot:
     def __init__(self):
         self.symmetry_analyzer: SymmetryAnalyzer | None = None
+        self.signal_propagator: SignalPropagator | None = None
         self.known_symmetry = None
-        self.pathing: BugNav2 | None = None
 
     def run(self, ct: Controller) -> None:
-        # --- Init persistent state on first turn ---
+        
+        '''
+        SYMMETRY ANALYSIS & PROPAGATION 
+        '''
         if self.symmetry_analyzer is None:
             self.symmetry_analyzer = SymmetryAnalyzer(ct)
 
-        if self.pathing is None:
-            cp = ct.get_position()
-            self.pathing = BugNav2(
-                core_pos=(cp.x, cp.y),
-                map_w=ct.get_map_width(),
-                map_h=ct.get_map_height(),
-            )
+        if self.signal_propagator is None:
+            self.signal_propagator = SignalPropagator(core_pos=ct.get_position())
 
-        # --- Symmetry analysis ---
         self.known_symmetry = self.symmetry_analyzer.update(ct)
+        self.signal_propagator.process_and_propagate(ct, self.known_symmetry)
 
-        # --- Harvest ore on any adjacent tile ---
-        for d in Direction:
-            check_pos = ct.get_position().add(d)
-            if ct.can_build_harvester(check_pos):
-                ct.build_harvester(check_pos)
-                break
-
-        # --- BugNav2: get desired move direction ---
-        move_dir = self.pathing.get_direction(ct)
-
+        '''
+        MOVEMENT LOGIC
+        '''
+        move_dir = random.choice(DIRECTIONS)
         if move_dir is not None:
             move_pos = ct.get_position().add(move_dir)
 
@@ -56,3 +49,11 @@ class BuilderBot:
 
             if ct.can_move(move_dir):
                 ct.move(move_dir)
+
+
+        # --- Harvest ore on any adjacent tile ---
+        for d in Direction:
+            check_pos = ct.get_position().add(d)
+            if ct.can_build_harvester(check_pos):
+                ct.build_harvester(check_pos)
+                break

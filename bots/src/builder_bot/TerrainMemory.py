@@ -5,9 +5,12 @@ DEBUG_PRINTS = True
 
 '''
 SymmetryAnalyzer:
-- Uses bitmasking (Magic Mask: 0x5A000000) to communicate.
-- Echo Suppression: Only places a marker if its knowledge isn't already visible nearby.
-- Road Clearing: Will destroy a ROAD to place a marker if no empty tiles are available.
+
+Holds memory of seen objects, is only allowed to place a marker given the following 2 conditions:
+1. New info by reading a friendly marker and combing that with its own knowledge, it should say this in the print when placing the marker
+2. Finds a method of symetry is invalid, therefore this is new information as long as it wasnt aware of this before. (aka read it on a marker before hand it would salready know)
+
+PropogateSymetry handles passing this information to the core.
 '''
 
 class SymmetryAnalyzer:
