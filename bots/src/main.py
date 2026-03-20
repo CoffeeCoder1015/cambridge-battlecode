@@ -4,30 +4,33 @@ Each unit gets its own Player instance; the engine calls run() once per round.
 Use Controller.get_entity_type() to branch on what kind of unit you are.
 
 This bot:
-  - Core: spawns up to 3 builder bots on random adjacent tiles
+  - Core: spawns up to 3 builder bots on random adjacent tiles, places a marker
   - Builder bot: builds a harvester on any adjacent ore tile, then moves in a
-    random direction (laying a road first so the tile is passable), and places
-    a marker recording the current round number
+    random direction (laying a road first so the tile is passable)
 """
 
 
 from cambc import Controller, EntityType
 
 from core.main import Core
-from builder_bot.main import Builder_bot
+from builder_bot.main import BuilderBot
 
-mapping = {
-    EntityType.CORE: Core,
-    EntityType.BUILDER_BOT: Builder_bot,
-}
+
 
 class Player:
     def __init__(self):
-        self.active:Core | Builder_bot = None
+        self.active: Core | BuilderBot = None
+        self.num_spawned = 0
 
     def run(self, ct: Controller) -> None:
         etype = ct.get_entity_type()
-        if self.active is None:
-            self.active = mapping[etype]()
-
-        self.active.run(ct)
+        
+        if etype == EntityType.CORE:
+            if self.active is None:
+                self.active = Core()
+            self.active.run(ct, self)
+            
+        elif etype == EntityType.BUILDER_BOT:
+            if self.active is None:
+                self.active = BuilderBot()
+            self.active.run(ct)
