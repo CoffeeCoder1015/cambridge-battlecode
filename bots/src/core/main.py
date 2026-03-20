@@ -18,7 +18,7 @@ class Core:
 
     def run(self, ct: Controller, player) -> None:
 
-        if player.num_spawned < 3:
+        if player.num_spawned < 5:
             spawn_pos = ct.get_position().add(random.choice(DIRECTIONS))
             if ct.can_spawn(spawn_pos):
                 ct.spawn_builder(spawn_pos)

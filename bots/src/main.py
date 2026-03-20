@@ -13,13 +13,13 @@ This bot:
 from cambc import Controller, EntityType
 
 from core.main import Core
-from builder_bot.main import run as builder_bot_run
+from builder_bot.main import BuilderBot
 
 
 
 class Player:
     def __init__(self):
-        self.active: Core = None
+        self.active: Core | BuilderBot = None
         self.num_spawned = 0
 
     def run(self, ct: Controller) -> None:
@@ -31,4 +31,6 @@ class Player:
             self.active.run(ct, self)
             
         elif etype == EntityType.BUILDER_BOT:
-            builder_bot_run(ct)
+            if self.active is None:
+                self.active = BuilderBot()
+            self.active.run(ct)

@@ -1,35 +1,58 @@
-from cambc import Controller, Direction
+from cambc import Controller, Direction, EntityType
 from .TerrainMemory import SymmetryAnalyzer
+from .Pathing import BugNav2
 
-import random
 import sys
-
 
 
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 
-def run(ct: Controller) -> None:
-    turn = ct.get_current_round()
 
-    if turn % 2 == 0:
-        symmetry_analyzer = SymmetryAnalyzer(ct)
-        found_symmetry = symmetry_analyzer.update(ct)
-        if found_symmetry != None:
-            print(f"Found symmetry: {found_symmetry}", file=sys.stderr)
+class BuilderBot:
+    def __init__(self):
+        self.symmetry_analyzer: SymmetryAnalyzer | None = None
+        self.known_symmetry = None
+        self.pathing: BugNav2 | None = None
 
-    for d in Direction:
-        check_pos = ct.get_position().add(d)
-        if ct.can_build_harvester(check_pos):
-            ct.build_harvester(check_pos)
-            break
+    def run(self, ct: Controller) -> None:
+        # --- Init persistent state on first turn ---
+        if self.symmetry_analyzer is None:
+            self.symmetry_analyzer = SymmetryAnalyzer(ct)
 
-    move_dir = random.choice(DIRECTIONS)
-    move_pos = ct.get_position().add(move_dir)
-    if ct.can_build_road(move_pos):
-        ct.build_road(move_pos)
-    if ct.can_move(move_dir):
-        ct.move(move_dir)
+        if self.pathing is None:
+            cp = ct.get_position()
+            self.pathing = BugNav2(
+                core_pos=(cp.x, cp.y),
+                map_w=ct.get_map_width(),
+                map_h=ct.get_map_height(),
+            )
 
-    # marker_pos = ct.get_position().add(random.choice(DIRECTIONS))
-    # if ct.can_place_marker(marker_pos):
-    #     ct.place_marker(marker_pos, ct.get_current_round())
+        # --- Symmetry analysis ---
+        self.known_symmetry = self.symmetry_analyzer.update(ct)
+
+        # --- Harvest ore on any adjacent tile ---
+        for d in Direction:
+            check_pos = ct.get_position().add(d)
+            if ct.can_build_harvester(check_pos):
+                ct.build_harvester(check_pos)
+                break
+
+        # --- BugNav2: get desired move direction ---
+        move_dir = self.pathing.get_direction(ct)
+
+        if move_dir is not None:
+            move_pos = ct.get_position().add(move_dir)
+
+            # Build road on the target tile if safe (no friendly marker there)
+            has_friendly_marker = any(
+                ct.get_entity_type(eid) == EntityType.MARKER
+                and ct.get_team(eid) == ct.get_team()
+                and ct.get_position(eid) == move_pos
+                for eid in ct.get_nearby_entities()
+            )
+
+            if ct.can_build_road(move_pos) and not has_friendly_marker:
+                ct.build_road(move_pos)
+
+            if ct.can_move(move_dir):
+                ct.move(move_dir)
