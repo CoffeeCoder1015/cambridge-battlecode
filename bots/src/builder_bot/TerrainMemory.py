@@ -60,7 +60,10 @@ class SymmetryAnalyzer:
         # We track what is ALREADY visible on the ground nearby
         visible_info_mask = 0
         cur = ct.get_position()
-        
+
+        # Snapshot possible before reading markers so we can detect marker-sourced new knowledge
+        possible_before_markers = set(self.possible)
+
         for m_id in ct.get_nearby_entities():
             try:
                 if ct.get_entity_type(m_id) == EntityType.MARKER and ct.get_team(m_id) == ct.get_team():
@@ -76,6 +79,10 @@ class SymmetryAnalyzer:
                 if DEBUG_PRINTS:
                     print(f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] FAILED to read entity {m_id} - Error: {repr(e)}", file=sys.stderr)
                 continue
+
+        # New symmetries eliminated this turn purely from reading a nearby friendly marker
+        newly_eliminated_by_marker = possible_before_markers - self.possible
+        marker_gave_new_info = bool(newly_eliminated_by_marker)
              
 
         # 2. Process NEW tiles
@@ -128,9 +135,12 @@ class SymmetryAnalyzer:
 
         # PLACEMENT CONDITION:
         # 1. We must know something (mask > 0)
-        # 2. What we know must be different from what we personally last sent
+        # 2. This turn produced genuinely new information — either:
+        #    a) A nearby friendly marker taught us something we didn't know yet, OR
+        #    b) A tile mismatch invalidated a symmetry candidate this turn
         # 3. What we know must NOT already be covered by nearby markers (Echo Suppression)
-        if my_knowledge_mask > 0 and my_knowledge_mask != self.last_broadcasted_mask:
+        new_info_this_turn = marker_gave_new_info or bool(invalidated_mismatches)
+        if my_knowledge_mask > 0 and new_info_this_turn:
             if (my_knowledge_mask & ~visible_info_mask) != 0:
                 sorted_tiles = self._get_sorted_nearby_tiles(ct, cur)
                 target_tile = None
@@ -158,18 +168,24 @@ class SymmetryAnalyzer:
                             self.sym_names[s] for s in (101, 102, 103)
                             if s in ({101, 102, 103} - self.possible)
                         ]
-                        mismatch_strs = [
-                            f"{self.sym_names[sym]}: tile {pos} ≠ mirror {m_pos}"
-                            for sym, (pos, m_pos) in invalidated_mismatches.items()
-                        ]
-                        reason = f" — from mismatches: {', '.join(mismatch_strs)}" if mismatch_strs else " — no new mismatches this turn (re-broadcasting)"
+                        reasons = []
+                        if invalidated_mismatches:
+                            mismatch_strs = [
+                                f"{self.sym_names[sym]}: tile {pos} ≠ mirror {m_pos}"
+                                for sym, (pos, m_pos) in invalidated_mismatches.items()
+                            ]
+                            reasons.append(f"tile mismatches: {', '.join(mismatch_strs)}")
+                        if marker_gave_new_info:
+                            marker_elim_names = [self.sym_names[s] for s in (101, 102, 103) if s in newly_eliminated_by_marker]
+                            reasons.append(f"read marker: newly eliminated=[{', '.join(marker_elim_names)}]")
+                        reason = " — " + " + ".join(reasons)
                         print(
-                        f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] "
-                        f"Placed marker at ({target_tile.x}, {target_tile.y}) "
-                        f"broadcasting eliminated=[{', '.join(eliminated_names)}]{reason} "
-                        f"| memory: possible=[{', '.join(self.sym_names[s] for s in sorted(self.possible))}] "
-                        f"tiles_seen={len(self.map_history)} last_broadcast_mask={bin(self.last_broadcasted_mask)}",
-                        file=sys.stderr,
-                    )
+                            f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] "
+                            f"Placed marker at ({target_tile.x}, {target_tile.y}) "
+                            f"broadcasting eliminated=[{', '.join(eliminated_names)}]{reason} "
+                            f"| memory: possible=[{', '.join(self.sym_names[s] for s in sorted(self.possible))}] "
+                            f"tiles_seen={len(self.map_history)} last_broadcast_mask={bin(self.last_broadcasted_mask)}",
+                            file=sys.stderr,
+                        )
 
         return self.solved_sym
