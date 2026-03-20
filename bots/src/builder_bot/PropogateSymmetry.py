@@ -1,6 +1,9 @@
 from collections import namedtuple
+import sys
 
 from cambc import EntityType, Position
+
+DEBUG_PRINTS = True
 
 _MarkerInfo = namedtuple('_MarkerInfo', ['value', 'position'])
 
@@ -88,6 +91,29 @@ class SignalPropagator:
                 # Pack the payload back into the MAGIC_MASK format
                 full_marker_value = self.MAGIC_MASK | combined_mask
                 controller.place_marker(best_pos, full_marker_value)
+                if DEBUG_PRINTS:
+                    sym_names = {101: "REF_X", 102: "REF_Y", 103: "ROT"}
+                    eliminated_names = (
+                        ([sym_names[101]] if combined_mask & 1 else [])
+                        + ([sym_names[102]] if combined_mask & 2 else [])
+                        + ([sym_names[103]] if combined_mask & 4 else [])
+                    )
+                    source = (
+                        f"known_symmetry={sym_names.get(known_symmetry, known_symmetry)}"
+                        if known_symmetry is not None else "read from nearby markers"
+                    )
+                    prev_dist_str = (
+                        f"{closest_known_dist:.0f}" if closest_known_dist != float('inf') else "∞"
+                    )
+                    print(
+                        f"TURN {controller.get_current_round()}: [PropagateSymmetry Bot {(my_pos.x, my_pos.y)}] "
+                        f"Placed relay marker at ({best_pos.x}, {best_pos.y}) "
+                        f"broadcasting eliminated=[{', '.join(eliminated_names)}] "
+                        f"| source: {source} "
+                        f"| dist²_to_core: {new_dist} < prev_closest={prev_dist_str} "
+                        f"| core=({self.core_pos.x}, {self.core_pos.y})",
+                        file=sys.stderr,
+                    )
 
 
     def _get_nearby_friendly_markers(self, controller):
