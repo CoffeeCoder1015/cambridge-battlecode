@@ -28,6 +28,7 @@ class SignalPropagator:
         :param core_pos: The Position object of your team's core.
         """
         self.core_pos = core_pos
+        self.last_combined_mask = 0
 
     def process_and_propagate(self, controller, known_symmetry: int | None):
         """
@@ -51,6 +52,9 @@ class SignalPropagator:
             # ROT is the answer -> REF_X (1) and REF_Y (2) are eliminated
             combined_mask = 0b011 
 
+        # Snapshot what we knew before scanning so we can detect marker-sourced gains
+        pre_scan_mask = combined_mask
+
         # 1. First Pass: Accumulate all knowledge in vision
         nearby_markers = self._get_nearby_friendly_markers(controller)
         
@@ -65,6 +69,17 @@ class SignalPropagator:
         # AND we saw no markers), do nothing
         if combined_mask == 0:
             return
+
+        # New-information guard: only propagate if we learned something new.
+        # Either a nearby marker gave us bits we didn't have (combined_mask > pre_scan_mask),
+        # or our overall knowledge grew since last round (combined_mask > last turn's mask).
+        gained_from_markers = combined_mask > pre_scan_mask
+        gained_overall = combined_mask > self.last_combined_mask
+        if not (gained_from_markers or gained_overall):
+            return
+
+        # Update our running memory of what we know regardless of whether we place
+        self.last_combined_mask = combined_mask
 
         # 2. Second Pass: Find how close THIS EXACT level of knowledge has gotten
         closest_known_dist = float('inf')

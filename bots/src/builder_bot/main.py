@@ -1,6 +1,7 @@
 from cambc import Controller, Direction, EntityType
 from .TerrainMemory import SymmetryAnalyzer
 from .PropogateSymmetry import SignalPropagator
+from .TangentBug import TangentBug
 
 import sys
 import random
@@ -16,22 +17,26 @@ class BuilderBot:
         self.known_symmetry = None
 
     def run(self, ct: Controller) -> None:
-        
-        '''
-        SYMMETRY ANALYSIS & PROPAGATION 
-        '''
+
         if self.symmetry_analyzer is None:
             self.symmetry_analyzer = SymmetryAnalyzer(ct)
 
         if self.signal_propagator is None:
             self.signal_propagator = SignalPropagator(core_pos=ct.get_position())
+        
+        '''
+        SYMMETRY ANALYSIS & PROPAGATION 
+        '''
 
+        #Try to find symmetry based on surroundings
         self.known_symmetry = self.symmetry_analyzer.update(ct)
+        #Read markers and propagate signal back to core
         self.signal_propagator.process_and_propagate(ct, self.known_symmetry)
 
         '''
         MOVEMENT LOGIC
         '''
+        
         move_dir = random.choice(DIRECTIONS)
         if move_dir is not None:
             move_pos = ct.get_position().add(move_dir)
