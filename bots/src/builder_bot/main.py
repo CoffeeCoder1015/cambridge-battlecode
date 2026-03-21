@@ -43,14 +43,10 @@ class BuilderBot:
         if not self._target_set:
             self.nav.set_target(ct.get_map_width() // 2, ct.get_map_height() // 2)
             self._target_set = True
-
         move_dir = self.nav.next_move(ct)
+
         if move_dir is not None:
             move_pos = ct.get_position().add(move_dir)
-
-            # Road placement: build a road on the target tile if it is not yet
-            # passable (i.e. it is an empty or ore tile) and there is no friendly
-            # marker sitting on it that we want to preserve.
             if not ct.is_tile_passable(move_pos):
                 has_friendly_marker = any(
                     ct.get_entity_type(eid) == EntityType.MARKER
