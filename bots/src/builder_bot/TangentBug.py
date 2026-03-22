@@ -161,6 +161,9 @@ class TangentBug:
         Diagonal clipping through wall corners is permitted: only the target
         tile itself is checked, not the orthogonal neighbours.
         """
+        if not self._is_in_map_bounds(ct, to_pos):
+            return False
+
         if not ct.is_in_vision(to_pos):
             return False
 
@@ -187,3 +190,7 @@ class TangentBug:
             return False
 
         return True
+
+    @staticmethod
+    def _is_in_map_bounds(ct, pos: Position) -> bool:
+        return 0 <= pos.x < ct.get_map_width() and 0 <= pos.y < ct.get_map_height()

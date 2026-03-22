@@ -49,12 +49,7 @@ class BuilderBot:
         '''
         guarded_acted = False
         if self.agentmode == "GUARDED_CONVEYER":
-            guarded_acted = self.guarded_conveyer.run(
-                ct=ct,
-                known_symmetry=self.known_symmetry,
-                symmetry_analyzer=self.symmetry_analyzer,
-            )
-
+            pass
 
 
 
