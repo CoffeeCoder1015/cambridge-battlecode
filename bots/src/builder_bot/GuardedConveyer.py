@@ -22,6 +22,8 @@ class GuardedConveyer:
         self.no_ore_in_scan = False
         self.was_on_core_last_turn = False
         self.pending_underfoot_core_link = False
+        self.ore_finalize_phase: str | None = None
+        self.retreat_conveyor_tile: Position | None = None
 
     def run(self, ct: Controller, nearby_tiles: list[Position]) -> tuple[bool, bool]:
         """
@@ -72,6 +74,8 @@ class GuardedConveyer:
             self.ore_target = None
             self.step_index = 0
             self.pending_underfoot_core_link = False
+            self.ore_finalize_phase = None
+            self.retreat_conveyor_tile = None
             return self._finish_turn(on_core_now, acted, False)
         self._log(ct, f"execution result: acted={acted}, failed={failed}")
         return self._finish_turn(on_core_now, acted, False)
@@ -125,6 +129,8 @@ class GuardedConveyer:
         self.ore_target = best_ore
         self.last_known_ore = best_ore
         self.step_index = 0
+        self.ore_finalize_phase = None
+        self.retreat_conveyor_tile = None
         self._log(
             ct,
             f"plan selected: ore={self.ore_target}, path_len={len(self.path)}, path={self.path}",
@@ -138,11 +144,20 @@ class GuardedConveyer:
 
         my_pos = ct.get_position()
 
+        if self.ore_finalize_phase is not None:
+            return self._run_ore_finalize_sequence(ct)
+
         if self._is_adjacent_cardinal(my_pos, self.ore_target):
-            self._log(ct, f"adjacent to ore {self.ore_target}, attempting final build")
-            built = self._try_build_generator(ct)
-            self._log(ct, f"final build result: built={built}")
-            return built, False
+            self.retreat_conveyor_tile = my_pos
+            self.ore_finalize_phase = "STEP_ONTO_ORE"
+            self._log(
+                ct,
+                (
+                    f"adjacent to ore {self.ore_target}; starting finalize sequence "
+                    "(step onto ore -> fortify ring -> retreat -> build)"
+                ),
+            )
+            return self._run_ore_finalize_sequence(ct)
 
         if self.step_index >= len(self.path):
             self._log(
@@ -166,6 +181,119 @@ class GuardedConveyer:
 
         self._log(ct, f"cannot move {move_dir} this round")
         return acted, False
+
+    def _run_ore_finalize_sequence(self, ct: Controller) -> tuple[bool, bool]:
+        if self.ore_target is None:
+            self._log(ct, "finalize failed: ore_target missing")
+            return False, True
+
+        my_pos = ct.get_position()
+        ore_pos = self.ore_target
+
+        if self.ore_finalize_phase == "STEP_ONTO_ORE":
+            if my_pos == ore_pos:
+                self.ore_finalize_phase = "FORTIFY_RING"
+                self._log(ct, f"finalize: arrived on ore tile {ore_pos}")
+                return False, False
+
+            # Requirement: place a road on ore before stepping onto it.
+            prepared, done = self._prepare_ore_tile_for_step(ct, ore_pos)
+            if prepared:
+                return True, False
+            if not done:
+                return False, False
+
+            step_dir = my_pos.direction_to(ore_pos)
+            if step_dir in CARDINAL_DIRECTIONS and ct.can_move(step_dir):
+                ct.move(step_dir)
+                self._log(ct, f"finalize: moved onto ore via {step_dir}")
+                return True, False
+
+            self._log(
+                ct,
+                f"finalize: waiting to step onto ore {ore_pos}; can_move={ct.can_move(step_dir) if step_dir in CARDINAL_DIRECTIONS else False}",
+            )
+            return False, False
+
+        if self.ore_finalize_phase == "FORTIFY_RING":
+            acted, done = self._fortify_ore_ring(ct, ore_pos)
+            if acted:
+                return True, False
+            if not done:
+                return False, False
+            self.ore_finalize_phase = "RETREAT_TO_CONVEYOR"
+            self._log(ct, "finalize: ore ring fortification complete")
+            return False, False
+
+        if self.ore_finalize_phase == "RETREAT_TO_CONVEYOR":
+            if self.retreat_conveyor_tile is None:
+                self._log(ct, "finalize: retreat tile missing, cannot continue")
+                return False, True
+
+            if my_pos == self.retreat_conveyor_tile:
+                self.ore_finalize_phase = "BUILD_GENERATOR"
+                self._log(ct, f"finalize: retreated to conveyor tile {my_pos}")
+                return False, False
+
+            step_dir = my_pos.direction_to(self.retreat_conveyor_tile)
+            if step_dir in CARDINAL_DIRECTIONS and ct.can_move(step_dir):
+                ct.move(step_dir)
+                self._log(ct, f"finalize: retreat moved {step_dir} to conveyor tile")
+                return True, False
+
+            self._log(ct, "finalize: retreat blocked this round")
+            return False, False
+
+        if self.ore_finalize_phase == "BUILD_GENERATOR":
+            cleared, done = self._clear_road_on_ore(ct, ore_pos)
+            if cleared:
+                return True, False
+            if not done:
+                return False, False
+
+            built = self._try_build_generator(ct)
+            self._log(ct, f"finalize: build result={built}")
+            if built and self.complete:
+                self.complete = False
+                self.ore_finalize_phase = "BACKFILL_TO_CORE"
+                self._log(ct, "finalize: generator built, starting conveyor backfill to core")
+            return built, False
+
+        if self.ore_finalize_phase == "BACKFILL_TO_CORE":
+            if self._is_on_friendly_core(ct, my_pos):
+                self.ore_finalize_phase = None
+                self.complete = True
+                print("done!", file=sys.stderr)
+                return False, False
+
+            acted, done = self._fortify_backfill_ring(ct, my_pos)
+            if acted:
+                return True, False
+            if not done:
+                return False, False
+
+            move_dir = self._underfoot_conveyor_direction(ct, my_pos)
+            if move_dir is None:
+                core_adj = self._adjacent_cardinal_core_tile(ct, my_pos)
+                if core_adj is not None:
+                    step_dir = my_pos.direction_to(core_adj)
+                    if step_dir in CARDINAL_DIRECTIONS and ct.can_move(step_dir):
+                        ct.move(step_dir)
+                        self._log(ct, f"backfill: moved directly onto core via {step_dir}")
+                        return True, False
+                self._log(ct, "backfill: no conveyor direction underfoot; waiting")
+                return False, False
+
+            if ct.can_move(move_dir):
+                ct.move(move_dir)
+                self._log(ct, f"backfill: moved along underfoot conveyor direction {move_dir}")
+                return True, False
+
+            self._log(ct, f"backfill: cannot move in conveyor direction {move_dir}")
+            return False, False
+
+        self._log(ct, f"finalize: unknown phase {self.ore_finalize_phase}")
+        return False, True
 
     def _path_to_adjacent_tile(
         self,
@@ -394,6 +522,204 @@ class GuardedConveyer:
 
         return acted
 
+    def _fortify_ore_ring(self, ct: Controller, ore_pos: Position) -> tuple[bool, bool]:
+        """
+        Build barriers on all 8 neighboring tiles around ore.
+        Only target ROAD, MARKER, and EMPTY tiles.
+        Natural walls or other structures are treated as already acceptable.
+        """
+        unresolved = False
+        for target in self._ore_ring_positions(ore_pos):
+            if not self._is_in_bounds(ct, target):
+                continue
+            if self.retreat_conveyor_tile is not None and target == self.retreat_conveyor_tile:
+                continue
+
+            marker_id = self._find_marker_at(ct, target)
+            if marker_id is not None:
+                unresolved = True
+                if ct.can_destroy(target):
+                    ct.destroy(target)
+                    self._log(ct, f"fortify: destroyed marker at {target}")
+                    return True, False
+                self._log(ct, f"fortify: marker at {target} not destroyable")
+                continue
+
+            building_id = ct.get_tile_building_id(target)
+            if building_id is not None:
+                b_type = ct.get_entity_type(building_id)
+                if b_type == EntityType.ROAD:
+                    unresolved = True
+                    if ct.can_destroy(target):
+                        ct.destroy(target)
+                        self._log(ct, f"fortify: destroyed road at {target}")
+                        return True, False
+                    self._log(ct, f"fortify: road at {target} not destroyable")
+                    continue
+
+                if b_type in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
+                    continue
+                # Non-road structures (barriers/core/harvesters/etc.) are left as-is.
+                continue
+
+            env = ct.get_tile_env(target)
+            if env == Environment.EMPTY:
+                unresolved = True
+                if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
+                    ct.build_barrier(target)
+                    self._log(ct, f"fortify: built barrier at {target}")
+                    return True, False
+
+                if ct.get_action_cooldown() != 0:
+                    self._log(ct, f"fortify: waiting action cooldown for {target}")
+                    return False, False
+
+        if unresolved:
+            return False, False
+        return False, True
+
+    def _prepare_ore_tile_for_step(self, ct: Controller, ore_pos: Position) -> tuple[bool, bool]:
+        """
+        Ensure ore tile has a road before stepping onto it.
+        Clears non-road blockers first (but preserves conveyors).
+        Returns (acted, done).
+        """
+        building_id = ct.get_tile_building_id(ore_pos)
+        if building_id is not None:
+            b_type = ct.get_entity_type(building_id)
+            b_team = ct.get_team(building_id)
+
+            if b_type == EntityType.ROAD and b_team == ct.get_team():
+                return False, True
+
+            if b_type in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
+                self._log(ct, f"step-on-ore blocked by conveyor at {ore_pos}; cannot replace")
+                return False, False
+
+            if ct.can_destroy(ore_pos):
+                ct.destroy(ore_pos)
+                self._log(ct, f"step-on-ore: destroyed {b_type} at {ore_pos}")
+                return True, False
+
+            self._log(ct, f"step-on-ore: cannot destroy {b_type} at {ore_pos}")
+            return False, False
+
+        marker_id = self._find_marker_at(ct, ore_pos)
+        if marker_id is not None:
+            if ct.can_destroy(ore_pos):
+                ct.destroy(ore_pos)
+                self._log(ct, f"step-on-ore: destroyed marker at {ore_pos}")
+                return True, False
+            self._log(ct, f"step-on-ore: marker at {ore_pos} not destroyable")
+            return False, False
+
+        if ct.get_action_cooldown() == 0 and ct.can_build_road(ore_pos):
+            ct.build_road(ore_pos)
+            self._log(ct, f"step-on-ore: built road at {ore_pos}")
+            return True, False
+
+        self._log(
+            ct,
+            f"step-on-ore: waiting to build road at {ore_pos}; action_cd={ct.get_action_cooldown()}",
+        )
+        return False, False
+
+    def _clear_road_on_ore(self, ct: Controller, ore_pos: Position) -> tuple[bool, bool]:
+        """
+        Before final generator build, remove road on ore if present.
+        Returns (acted, done).
+        """
+        building_id = ct.get_tile_building_id(ore_pos)
+        if building_id is None:
+            return False, True
+
+        b_type = ct.get_entity_type(building_id)
+        b_team = ct.get_team(building_id)
+        if b_type != EntityType.ROAD:
+            return False, True
+
+        if b_team != ct.get_team():
+            self._log(ct, f"build-phase: enemy road on ore at {ore_pos}; cannot clear")
+            return False, False
+
+        if ct.can_destroy(ore_pos):
+            ct.destroy(ore_pos)
+            self._log(ct, f"build-phase: cleared road on ore at {ore_pos}")
+            return True, False
+
+        self._log(ct, f"build-phase: road on ore at {ore_pos} not destroyable yet")
+        return False, False
+
+    def _fortify_backfill_ring(self, ct: Controller, center: Position) -> tuple[bool, bool]:
+        """
+        Fill neighbors around current conveyor tile with barriers while returning to core.
+        Preserve conveyors and the ore/generator tile.
+        Only target ROAD, MARKER, and EMPTY tiles.
+        Natural walls or other structures are treated as already acceptable.
+        """
+        unresolved = False
+        for target in self._ore_ring_positions(center):
+            if not self._is_in_bounds(ct, target):
+                continue
+            if self.ore_target is not None and target == self.ore_target:
+                continue
+
+            marker_id = self._find_marker_at(ct, target)
+            if marker_id is not None:
+                unresolved = True
+                if ct.can_destroy(target):
+                    ct.destroy(target)
+                    self._log(ct, f"backfill: destroyed marker at {target}")
+                    return True, False
+                self._log(ct, f"backfill: marker at {target} not destroyable")
+                continue
+
+            building_id = ct.get_tile_building_id(target)
+            if building_id is not None:
+                b_type = ct.get_entity_type(building_id)
+                if b_type == EntityType.ROAD:
+                    unresolved = True
+                    if ct.can_destroy(target):
+                        ct.destroy(target)
+                        self._log(ct, f"backfill: destroyed road at {target}")
+                        return True, False
+                    self._log(ct, f"backfill: road at {target} not destroyable")
+                    continue
+
+                if b_type in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
+                    continue
+                # Non-road structures (barriers/core/harvesters/etc.) are left as-is.
+                continue
+
+            env = ct.get_tile_env(target)
+            if env == Environment.EMPTY:
+                unresolved = True
+                if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
+                    ct.build_barrier(target)
+                    self._log(ct, f"backfill: built barrier at {target}")
+                    return True, False
+
+                if ct.get_action_cooldown() != 0:
+                    self._log(ct, f"backfill: waiting action cooldown for {target}")
+                    return False, False
+
+        if unresolved:
+            return False, False
+        return False, True
+
+    @staticmethod
+    def _ore_ring_positions(ore_pos: Position) -> list[Position]:
+        return [
+            Position(ore_pos.x + dx, ore_pos.y + dy)
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            if not (dx == 0 and dy == 0)
+        ]
+
+    @staticmethod
+    def _is_in_bounds(ct: Controller, pos: Position) -> bool:
+        return 0 <= pos.x < ct.get_map_width() and 0 <= pos.y < ct.get_map_height()
+
     def _swap_underfoot_to_core_conveyor(self, ct: Controller) -> tuple[bool, bool]:
         my_pos = ct.get_position()
         core_pos = self._adjacent_cardinal_core_tile(ct, my_pos)
@@ -462,6 +788,23 @@ class GuardedConveyer:
                 return check
         return None
 
+    def _underfoot_conveyor_direction(self, ct: Controller, pos: Position) -> Direction | None:
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return None
+        b_type = ct.get_entity_type(building_id)
+        if b_type not in (EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
+            return None
+        if ct.get_team(building_id) != ct.get_team():
+            return None
+        try:
+            d = ct.get_direction(building_id)
+        except Exception:
+            return None
+        if d in CARDINAL_DIRECTIONS:
+            return d
+        return None
+
     @staticmethod
     def _find_marker_at(ct: Controller, pos: Position) -> int | None:
         for entity_id in ct.get_nearby_entities():
@@ -492,3 +835,11 @@ class GuardedConveyer:
     ) -> tuple[bool, bool]:
         self.was_on_core_last_turn = on_core_now
         return acted, failed
+
+    def should_suppress_main_movement(self, ct: Controller) -> bool:
+        """
+        While finalizing around ore, guarded mode should fully own movement.
+        This prevents fallback navigation from moving the bot off the ore workflow.
+        """
+        _ = ct
+        return self.ore_finalize_phase is not None

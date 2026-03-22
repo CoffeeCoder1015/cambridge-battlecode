@@ -54,6 +54,19 @@ class BuilderBot:
         guarded_acted = False
         if self.agentmode == "GUARDED_CONVEYER":
             guarded_acted, guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
+            if (
+                not guarded_acted
+                and self.guarded_conveyer.should_suppress_main_movement(ct)
+            ):
+                guarded_acted = True
+                if ct.get_current_round() < 100:
+                    print(
+                        (
+                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
+                            "suppressing fallback movement during ore finalize sequence"
+                        ),
+                        file=sys.stderr,
+                    )
             if not guarded_acted and self.guarded_conveyer.no_ore_in_scan:
                 guarded_acted = self.gaurded_convery_move.run(ct)
                 if ct.get_current_round() < 100:
