@@ -1,4 +1,5 @@
 from cambc import Controller, Direction, EntityType, Environment, Position
+from .TangentBug import TangentBug
 import sys
 
 
@@ -7,6 +8,12 @@ class GuardedConveyer:
 
     ACTION_RADIUS_SQ = 2
     MOVE_DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
+    CARDINAL_DIRECTIONS = [
+        Direction.NORTH,
+        Direction.EAST,
+        Direction.SOUTH,
+        Direction.WEST,
+    ]
     ORE_ENVS = (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE)
     DEBUG_PRINTS_ENABLED = True
     DEBUG_PRINTS_MAX_ROUND = 100
@@ -15,13 +22,18 @@ class GuardedConveyer:
         self._ore_target: Position | None = None
         self._generator_pos: Position | None = None
         self._starting_position: Position | None = None
+        self._friendly_core_pos: Position | None = None
         self._has_relocated = False
         self._has_returned_to_start = False
+        self._has_placed_final_conveyor = False
+        self._return_nav = TangentBug()
 
     def run(self, ct: Controller, known_symmetry, symmetry_analyzer) -> bool:
         """
         Returns True if this mode consumed the turn with a road build or move.
         """
+        self._refresh_friendly_core_pos(ct)
+
         if self._generator_pos is None or self._starting_position is None:
             self._capture_adjacent_ore_setup(ct, symmetry_analyzer)
 
@@ -49,7 +61,13 @@ class GuardedConveyer:
 
         ahead = my_pos.add(best_dir)
         if not self._has_friendly_road(ct, ahead):
-            if ct.can_build_road(ahead):
+            if self._is_cardinal_adjacent_to_start(ahead):
+                self._dbg(
+                    ct,
+                    "skipping road near start",
+                    f"at={self._fmt_pos(ahead)} start={self._fmt_pos(self._starting_position)}",
+                )
+            elif ct.can_build_road(ahead):
                 ct.build_road(ahead)
                 # Try to move after placing road on the same turn if legal.
                 if ct.can_move(best_dir):
@@ -77,6 +95,7 @@ class GuardedConveyer:
         self._starting_position = my_pos
         self._has_relocated = False
         self._has_returned_to_start = False
+        self._has_placed_final_conveyor = False
         self._dbg(
             ct,
             "locked setup",
@@ -88,6 +107,14 @@ class GuardedConveyer:
         starting_pos = self._starting_position
         if generator_pos is None or starting_pos is None:
             return False
+
+        if (not self._has_placed_final_conveyor) and (not ct.is_in_vision(generator_pos)):
+            self._dbg(
+                ct,
+                "generator out of vision",
+                f"current={self._fmt_pos(ct.get_position())} generator={self._fmt_pos(generator_pos)}",
+            )
+            return self._move_towards_position(ct, generator_pos)
 
         if not self._has_friendly_harvester(ct, generator_pos):
             if ct.can_build_harvester(generator_pos):
@@ -107,7 +134,13 @@ class GuardedConveyer:
             if relocate_dir is not None:
                 relocate_to = ct.get_position().add(relocate_dir)
                 if not self._has_friendly_road(ct, relocate_to):
-                    if ct.can_build_road(relocate_to):
+                    if self._is_cardinal_adjacent_to_start(relocate_to):
+                        self._dbg(
+                            ct,
+                            "relocate road forbidden",
+                            f"target={self._fmt_pos(relocate_to)} start={self._fmt_pos(starting_pos)}",
+                        )
+                    elif ct.can_build_road(relocate_to):
                         self._dbg(ct, "building relocate road", f"at={self._fmt_pos(relocate_to)}")
                         ct.build_road(relocate_to)
                     else:
@@ -171,7 +204,13 @@ class GuardedConveyer:
             if back_dir is not None:
                 back_to = ct.get_position().add(back_dir)
                 if not self._has_friendly_road(ct, back_to):
-                    if ct.can_build_road(back_to):
+                    if self._is_cardinal_adjacent_to_start(back_to):
+                        self._dbg(
+                            ct,
+                            "return road forbidden",
+                            f"target={self._fmt_pos(back_to)} start={self._fmt_pos(starting_pos)}",
+                        )
+                    elif ct.can_build_road(back_to):
                         self._dbg(ct, "building return road", f"at={self._fmt_pos(back_to)}")
                         ct.build_road(back_to)
                     else:
@@ -208,7 +247,7 @@ class GuardedConveyer:
             ct,
             generator_pos,
             starting_pos,
-            include_starting_pos=True,
+            include_starting_pos=False,
         )
         if final_wall_target is not None:
             if self._prepare_tile_for_barrier(ct, final_wall_target):
@@ -224,11 +263,69 @@ class GuardedConveyer:
             )
             return True
 
-        # Setup complete; do not fall back to roaming logic.
+        if not self._has_placed_final_conveyor:
+            if self._place_final_conveyor(ct, generator_pos, starting_pos):
+                return True
+
+        return self._run_return_to_core_with_conveyors(ct)
+
+    def _place_final_conveyor(
+        self,
+        ct: Controller,
+        generator_pos: Position,
+        starting_pos: Position,
+    ) -> bool:
+        my_pos = ct.get_position()
+        if not self._same_pos(my_pos, starting_pos):
+            self._dbg(
+                ct,
+                "final conveyor deferred",
+                f"current={self._fmt_pos(my_pos)} start={self._fmt_pos(starting_pos)}",
+            )
+            return True
+
+        away_dir = my_pos.direction_to(generator_pos).opposite()
+        if away_dir == Direction.CENTRE:
+            self._dbg(
+                ct,
+                "final conveyor skipped",
+                f"cannot determine away direction from generator={self._fmt_pos(generator_pos)}",
+            )
+            self._has_placed_final_conveyor = True
+            return True
+
+        tile_building_id = ct.get_tile_building_id(my_pos)
+        if (
+            tile_building_id is not None
+            and ct.get_team(tile_building_id) == ct.get_team()
+            and ct.get_entity_type(tile_building_id) == EntityType.CONVEYOR
+        ):
+            if ct.get_direction(tile_building_id) == away_dir:
+                self._dbg(
+                    ct,
+                    "final conveyor already correct",
+                    f"at={self._fmt_pos(my_pos)} dir={away_dir}",
+                )
+                self._has_placed_final_conveyor = True
+                return True
+
+        if self._prepare_tile_for_conveyor(ct, my_pos, away_dir):
+            return True
+
+        if ct.can_build_conveyor(my_pos, away_dir):
+            self._dbg(
+                ct,
+                "building final conveyor",
+                f"at={self._fmt_pos(my_pos)} dir={away_dir}",
+            )
+            ct.build_conveyor(my_pos, away_dir)
+            self._has_placed_final_conveyor = True
+            return True
+
         self._dbg(
             ct,
-            "no barrier action",
-            f"current={self._fmt_pos(ct.get_position())} generator={self._fmt_pos(generator_pos)}",
+            "final conveyor blocked",
+            f"at={self._fmt_pos(my_pos)} dir={away_dir} can_build_conveyor=False",
         )
         return True
 
@@ -249,6 +346,114 @@ class GuardedConveyer:
                 ores[(pos.x, pos.y)] = pos
 
         return list(ores.values())
+
+    def _run_return_to_core_with_conveyors(self, ct: Controller) -> bool:
+        core_pos = self._friendly_core_pos
+        if core_pos is None:
+            self._dbg(ct, "return-to-core waiting", "core_pos unresolved")
+            return True
+
+        my_pos = ct.get_position()
+        if self._same_pos(my_pos, core_pos):
+            self._dbg(ct, "return-to-core complete", f"at={self._fmt_pos(core_pos)}")
+            return True
+
+        conveyor_dir = self._get_cardinal_step_towards_target(ct, my_pos, core_pos)
+        if conveyor_dir is not None:
+            if not self._has_matching_friendly_conveyor(ct, my_pos, conveyor_dir):
+                if self._prepare_tile_for_conveyor(ct, my_pos, conveyor_dir):
+                    return True
+                if ct.can_build_conveyor(my_pos, conveyor_dir):
+                    self._dbg(
+                        ct,
+                        "building return conveyor",
+                        f"at={self._fmt_pos(my_pos)} dir={conveyor_dir}",
+                    )
+                    ct.build_conveyor(my_pos, conveyor_dir)
+                    self._has_placed_final_conveyor = True
+                    return True
+                self._dbg(
+                    ct,
+                    "cannot place return conveyor",
+                    f"at={self._fmt_pos(my_pos)} dir={conveyor_dir} can_build_conveyor=False",
+                )
+                return True
+
+        nav_target = self._return_nav.target
+        if nav_target is None or nav_target[0] != core_pos.x or nav_target[1] != core_pos.y:
+            self._return_nav.set_target(core_pos.x, core_pos.y)
+
+        move_dir = self._return_nav.next_move(ct)
+        if move_dir is None:
+            self._dbg(
+                ct,
+                "return-to-core blocked",
+                f"current={self._fmt_pos(my_pos)} core={self._fmt_pos(core_pos)}",
+            )
+            return True
+
+        if self._is_diagonal_direction(move_dir):
+            cardinal_dir = self._get_cardinal_step_towards_target(ct, my_pos, core_pos)
+            if cardinal_dir is None:
+                self._dbg(
+                    ct,
+                    "cardinal fallback blocked",
+                    f"current={self._fmt_pos(my_pos)} core={self._fmt_pos(core_pos)}",
+                )
+                return True
+            move_dir = cardinal_dir
+
+        if not ct.can_move(move_dir):
+            self._dbg(
+                ct,
+                "return move blocked",
+                f"dir={move_dir} current={self._fmt_pos(my_pos)}",
+            )
+            return True
+
+        move_to = my_pos.add(move_dir)
+        self._dbg(
+            ct,
+            "moving to core",
+            f"dir={move_dir} from={self._fmt_pos(my_pos)} to={self._fmt_pos(move_to)}",
+        )
+        ct.move(move_dir)
+        return True
+
+    def _move_towards_position(self, ct: Controller, target: Position) -> bool:
+        step_dir = self._get_greedy_step(ct, ct.get_position(), target)
+        if step_dir is None:
+            return True
+        if ct.can_move(step_dir):
+            ct.move(step_dir)
+        return True
+
+    def _get_cardinal_step_towards_target(
+        self,
+        ct: Controller,
+        cur: Position,
+        target: Position,
+    ) -> Direction | None:
+        current_dist = self._dist_sq(cur, target)
+        improving: list[tuple[int, Direction]] = []
+        fallback: list[tuple[int, Direction]] = []
+
+        for d in self.CARDINAL_DIRECTIONS:
+            nxt = cur.add(d)
+            if not (ct.is_tile_passable(nxt) or ct.can_build_road(nxt)):
+                continue
+            next_dist = self._dist_sq(nxt, target)
+            fallback.append((next_dist, d))
+            if next_dist < current_dist:
+                improving.append((next_dist, d))
+
+        if improving:
+            improving.sort(key=lambda item: item[0])
+            return improving[0][1]
+        if fallback:
+            fallback.sort(key=lambda item: item[0])
+            return fallback[0][1]
+        return None
 
     def _update_target(
         self,
@@ -305,6 +510,8 @@ class GuardedConveyer:
         return options[0][1]
 
     def _has_friendly_road(self, ct: Controller, pos: Position) -> bool:
+        if not ct.is_in_vision(pos):
+            return False
         building_id = ct.get_tile_building_id(pos)
         if building_id is None:
             return False
@@ -314,6 +521,8 @@ class GuardedConveyer:
         )
 
     def _has_friendly_harvester(self, ct: Controller, pos: Position) -> bool:
+        if not ct.is_in_vision(pos):
+            return False
         building_id = ct.get_tile_building_id(pos)
         if building_id is None:
             return False
@@ -321,6 +530,23 @@ class GuardedConveyer:
             ct.get_entity_type(building_id) == EntityType.HARVESTER
             and ct.get_team(building_id) == ct.get_team()
         )
+
+    def _has_matching_friendly_conveyor(
+        self,
+        ct: Controller,
+        pos: Position,
+        direction: Direction,
+    ) -> bool:
+        if not ct.is_in_vision(pos):
+            return False
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+        if ct.get_team(building_id) != ct.get_team():
+            return False
+        if ct.get_entity_type(building_id) != EntityType.CONVEYOR:
+            return False
+        return ct.get_direction(building_id) == direction
 
     def _get_guard_relocation_dir(
         self,
@@ -376,6 +602,39 @@ class GuardedConveyer:
                 return True
         return False
 
+    def _refresh_friendly_core_pos(self, ct: Controller) -> None:
+        core_pos = self._find_visible_friendly_core_pos(ct)
+        if core_pos is not None:
+            self._friendly_core_pos = core_pos
+            return
+
+        start = self._starting_position
+        if start is None:
+            return
+
+        for d in [Direction.CENTRE] + self.MOVE_DIRECTIONS:
+            check_pos = start.add(d)
+            if not ct.is_in_vision(check_pos):
+                continue
+            building_id = ct.get_tile_building_id(check_pos)
+            if building_id is None:
+                continue
+            if (
+                ct.get_entity_type(building_id) == EntityType.CORE
+                and ct.get_team(building_id) == ct.get_team()
+            ):
+                self._friendly_core_pos = check_pos
+                return
+
+    def _find_visible_friendly_core_pos(self, ct: Controller) -> Position | None:
+        for entity_id in ct.get_nearby_entities():
+            if ct.get_entity_type(entity_id) != EntityType.CORE:
+                continue
+            if ct.get_team(entity_id) != ct.get_team():
+                continue
+            return ct.get_position(entity_id)
+        return None
+
     def _get_next_wall_target(
         self,
         ct: Controller,
@@ -389,6 +648,8 @@ class GuardedConveyer:
             if not ct.is_in_vision(p):
                 continue
             if (not include_starting_pos) and p.x == starting_pos.x and p.y == starting_pos.y:
+                continue
+            if self._is_cardinal_adjacent(starting_pos, p):
                 continue
             if self._dist_sq(ct.get_position(), p) > self.ACTION_RADIUS_SQ:
                 continue
@@ -466,6 +727,62 @@ class GuardedConveyer:
         )
         return False
 
+    def _prepare_tile_for_conveyor(
+        self,
+        ct: Controller,
+        pos: Position,
+        direction: Direction,
+    ) -> bool:
+        """
+        Try to clear friendly blockers that prevent conveyor placement.
+        Returns True if we consumed the turn.
+        """
+        if ct.can_build_conveyor(pos, direction):
+            return False
+
+        if self._has_friendly_marker_at_pos(ct, pos):
+            if ct.can_destroy(pos):
+                self._dbg(ct, "destroying conveyor blocker", f"at={self._fmt_pos(pos)} type={EntityType.MARKER}")
+                ct.destroy(pos)
+                return True
+            self._dbg(
+                ct,
+                "cannot destroy conveyor blocker",
+                f"at={self._fmt_pos(pos)} type={EntityType.MARKER}",
+            )
+            return False
+
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+
+        if ct.get_team(building_id) != ct.get_team():
+            return False
+
+        blocker_type = ct.get_entity_type(building_id)
+        if blocker_type == EntityType.CONVEYOR and ct.get_direction(building_id) == direction:
+            self._has_placed_final_conveyor = True
+            return False
+
+        if blocker_type in (EntityType.CORE, EntityType.HARVESTER):
+            return False
+
+        if ct.can_destroy(pos):
+            self._dbg(
+                ct,
+                "destroying conveyor blocker",
+                f"at={self._fmt_pos(pos)} type={blocker_type}",
+            )
+            ct.destroy(pos)
+            return True
+
+        self._dbg(
+            ct,
+            "cannot destroy conveyor blocker",
+            f"at={self._fmt_pos(pos)} type={blocker_type}",
+        )
+        return False
+
     def _has_friendly_marker_at_pos(self, ct: Controller, pos: Position) -> bool:
         for entity_id in ct.get_nearby_entities():
             if ct.get_entity_type(entity_id) != EntityType.MARKER:
@@ -480,6 +797,25 @@ class GuardedConveyer:
     @staticmethod
     def _same_pos(a: Position, b: Position) -> bool:
         return a.x == b.x and a.y == b.y
+
+    def _is_cardinal_adjacent_to_start(self, pos: Position) -> bool:
+        start = self._starting_position
+        if start is None:
+            return False
+        return self._is_cardinal_adjacent(start, pos)
+
+    @staticmethod
+    def _is_cardinal_adjacent(a: Position, b: Position) -> bool:
+        return abs(a.x - b.x) + abs(a.y - b.y) == 1
+
+    @staticmethod
+    def _is_diagonal_direction(direction: Direction) -> bool:
+        return direction in (
+            Direction.NORTHEAST,
+            Direction.NORTHWEST,
+            Direction.SOUTHEAST,
+            Direction.SOUTHWEST,
+        )
 
     def _dbg(self, ct: Controller, stage: str, extra: str) -> None:
         if not self.DEBUG_PRINTS_ENABLED:
