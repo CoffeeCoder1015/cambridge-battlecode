@@ -1,4 +1,5 @@
 from cambc import Controller, Direction, EntityType, Environment, Position
+import sys
 
 
 class GuardedConveyer:
@@ -7,14 +8,30 @@ class GuardedConveyer:
     ACTION_RADIUS_SQ = 2
     MOVE_DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
     ORE_ENVS = (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE)
+    DEBUG_PRINTS_ENABLED = True
+    DEBUG_PRINTS_MAX_ROUND = 100
 
     def __init__(self) -> None:
         self._ore_target: Position | None = None
+        self._generator_pos: Position | None = None
+        self._starting_position: Position | None = None
+        self._has_relocated = False
 
     def run(self, ct: Controller, known_symmetry, symmetry_analyzer) -> bool:
         """
         Returns True if this mode consumed the turn with a road build or move.
         """
+        if self._generator_pos is None or self._starting_position is None:
+            self._capture_adjacent_ore_setup(ct, symmetry_analyzer)
+
+        if self._generator_pos is not None and self._starting_position is not None:
+            self._dbg(
+                ct,
+                "guarded_setup active",
+                f"generator={self._fmt_pos(self._generator_pos)} start={self._fmt_pos(self._starting_position)} relocated={self._has_relocated}",
+            )
+            return self._run_guarded_setup(ct)
+
         ore_positions = self._get_visible_ore_positions(ct, symmetry_analyzer)
         self._update_target(ct, ore_positions, known_symmetry)
 
@@ -43,6 +60,98 @@ class GuardedConveyer:
             return True
 
         return False
+
+    def _capture_adjacent_ore_setup(self, ct: Controller, symmetry_analyzer) -> None:
+        if self._generator_pos is not None and self._starting_position is not None:
+            return
+
+        my_pos = ct.get_position()
+        ore_positions = self._get_visible_ore_positions(ct, symmetry_analyzer)
+        adjacent_ores = [ore for ore in ore_positions if self._dist_sq(my_pos, ore) <= self.ACTION_RADIUS_SQ]
+        if not adjacent_ores:
+            return
+
+        adjacent_ores.sort(key=lambda ore: (self._dist_sq(my_pos, ore), ore.x, ore.y))
+        self._generator_pos = adjacent_ores[0]
+        self._starting_position = my_pos
+        self._has_relocated = False
+        self._dbg(
+            ct,
+            "locked setup",
+            f"generator={self._fmt_pos(self._generator_pos)} start={self._fmt_pos(self._starting_position)}",
+        )
+
+    def _run_guarded_setup(self, ct: Controller) -> bool:
+        generator_pos = self._generator_pos
+        starting_pos = self._starting_position
+        if generator_pos is None or starting_pos is None:
+            return False
+
+        if not self._has_friendly_harvester(ct, generator_pos):
+            if ct.can_build_harvester(generator_pos):
+                self._dbg(ct, "building harvester", f"at={self._fmt_pos(generator_pos)}")
+                ct.build_harvester(generator_pos)
+                return True
+            # Stay put and keep trying to build the generator first.
+            self._dbg(
+                ct,
+                "waiting to build harvester",
+                f"target={self._fmt_pos(generator_pos)} can_build=False",
+            )
+            return True
+
+        if not self._has_relocated:
+            relocate_dir = self._get_guard_relocation_dir(ct, generator_pos)
+            if relocate_dir is not None:
+                relocate_to = ct.get_position().add(relocate_dir)
+                if not self._has_friendly_road(ct, relocate_to):
+                    if ct.can_build_road(relocate_to):
+                        self._dbg(ct, "building relocate road", f"at={self._fmt_pos(relocate_to)}")
+                        ct.build_road(relocate_to)
+                    else:
+                        self._dbg(
+                            ct,
+                            "relocate road blocked",
+                            f"target={self._fmt_pos(relocate_to)} can_build_road=False",
+                        )
+
+                if ct.can_move(relocate_dir):
+                    self._dbg(
+                        ct,
+                        "relocating",
+                        f"dir={relocate_dir} from={self._fmt_pos(ct.get_position())} to={self._fmt_pos(relocate_to)}",
+                    )
+                    ct.move(relocate_dir)
+                    self._has_relocated = True
+                    return True
+
+                self._dbg(
+                    ct,
+                    "relocation move blocked",
+                    f"dir={relocate_dir} target={self._fmt_pos(relocate_to)} can_move=False",
+                )
+                return True
+            # Keep position while waiting for a valid relocation tile.
+            self._dbg(
+                ct,
+                "relocation blocked",
+                f"current={self._fmt_pos(ct.get_position())} generator={self._fmt_pos(generator_pos)}",
+            )
+            return True
+
+        wall_target = self._get_next_wall_target(ct, generator_pos, starting_pos)
+        if wall_target is not None and ct.can_build_barrier(wall_target):
+            self._dbg(ct, "building barrier", f"at={self._fmt_pos(wall_target)}")
+            ct.build_barrier(wall_target)
+            return True
+
+        # Setup complete; do not fall back to roaming logic.
+        self._dbg(
+            ct,
+            "no barrier action",
+            f"current={self._fmt_pos(ct.get_position())} generator={self._fmt_pos(generator_pos)}",
+        )
+        return True
 
     def _get_visible_ore_positions(self, ct: Controller, symmetry_analyzer) -> list[Position]:
         ores: dict[tuple[int, int], Position] = {}
@@ -124,6 +233,108 @@ class GuardedConveyer:
             ct.get_entity_type(building_id) == EntityType.ROAD
             and ct.get_team(building_id) == ct.get_team()
         )
+
+    def _has_friendly_harvester(self, ct: Controller, pos: Position) -> bool:
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+        return (
+            ct.get_entity_type(building_id) == EntityType.HARVESTER
+            and ct.get_team(building_id) == ct.get_team()
+        )
+
+    def _get_guard_relocation_dir(
+        self,
+        ct: Controller,
+        generator_pos: Position,
+    ) -> Direction | None:
+        my_pos = ct.get_position()
+        options: list[tuple[int, int, int, int, int, Direction]] = []
+
+        for d in self.MOVE_DIRECTIONS:
+            nxt = my_pos.add(d)
+
+            if self._dist_sq(nxt, generator_pos) > self.ACTION_RADIUS_SQ:
+                continue
+            # Match existing road-then-move pattern used elsewhere:
+            # a relocation tile is valid if we can stand there now OR can pave it first.
+            if not (ct.is_tile_passable(nxt) or ct.can_build_road(nxt)):
+                continue
+
+            step_dx = abs(nxt.x - my_pos.x)
+            step_dy = abs(nxt.y - my_pos.y)
+            is_diagonal = 1 if step_dx == 1 and step_dy == 1 else 0
+            is_core_adjacent = 1 if self._is_adjacent_to_friendly_core(ct, nxt) else 0
+            options.append(
+                (
+                    -is_core_adjacent,  # Prefer core-adjacent, but do not require.
+                    -is_diagonal,       # Then prefer diagonal.
+                    self._dist_sq(nxt, generator_pos),
+                    nxt.x,
+                    nxt.y,
+                    d,
+                )
+            )
+
+        if not options:
+            return None
+
+        options.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
+        return options[0][5]
+
+    def _is_adjacent_to_friendly_core(self, ct: Controller, pos: Position) -> bool:
+        for d in [Direction.CENTRE] + self.MOVE_DIRECTIONS:
+            check_pos = pos.add(d)
+            if not ct.is_in_vision(check_pos):
+                continue
+            building_id = ct.get_tile_building_id(check_pos)
+            if building_id is None:
+                continue
+            if (
+                ct.get_entity_type(building_id) == EntityType.CORE
+                and ct.get_team(building_id) == ct.get_team()
+            ):
+                return True
+        return False
+
+    def _get_next_wall_target(
+        self,
+        ct: Controller,
+        generator_pos: Position,
+        starting_pos: Position,
+    ) -> Position | None:
+        neighbors: list[Position] = []
+        for d in self.MOVE_DIRECTIONS:
+            p = generator_pos.add(d)
+            if not ct.is_in_vision(p):
+                continue
+            if p.x == starting_pos.x and p.y == starting_pos.y:
+                continue
+            if self._dist_sq(ct.get_position(), p) > self.ACTION_RADIUS_SQ:
+                continue
+            neighbors.append(p)
+
+        neighbors.sort(key=lambda p: (self._dist_sq(ct.get_position(), p), p.x, p.y))
+        for p in neighbors:
+            if ct.can_build_barrier(p):
+                return p
+        return None
+
+    def _dbg(self, ct: Controller, stage: str, extra: str) -> None:
+        if not self.DEBUG_PRINTS_ENABLED:
+            return
+        if ct.get_current_round() > self.DEBUG_PRINTS_MAX_ROUND:
+            return
+        print(
+            f"[GuardedConveyer][turn={ct.get_current_round()}][r={ct.get_current_round()}][id={ct.get_id()}] {stage}: {extra}",
+            file=sys.stderr,
+        )
+
+    @staticmethod
+    def _fmt_pos(pos: Position | None) -> str:
+        if pos is None:
+            return "None"
+        return f"({pos.x},{pos.y})"
 
     @staticmethod
     def _dist_sq(a: Position, b: Position) -> int:
