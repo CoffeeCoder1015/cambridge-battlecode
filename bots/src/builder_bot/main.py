@@ -29,8 +29,12 @@ class BuilderBot:
 
     def run(self, ct: Controller) -> None:
 
+        self._refresh_core_pos(ct)
+
         if self.symmetry_analyzer is None:
-            self.symmetry_analyzer = SymmetryAnalyzer(ct)
+            self.symmetry_analyzer = SymmetryAnalyzer(ct, core_pos=self.core_pos)
+        elif self.core_pos is not None:
+            self.symmetry_analyzer.update_core_pos(self.core_pos)
 
         if self.signal_propagator is None:
             self.signal_propagator = SignalPropagator(core_pos=ct.get_position())
@@ -40,8 +44,6 @@ class BuilderBot:
         """
         if ct.get_current_round() == 1:
             self.agentmode = "GUARDED_CONVEYER"
-
-        self._refresh_core_pos(ct)
 
         nearby_tiles = ct.get_nearby_tiles()
         '''

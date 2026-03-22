@@ -16,11 +16,14 @@ PropogateSymetry handles passing this information to the core.
 class SymmetryAnalyzer:
     MAGIC_MASK = 0x5A000000 
     
-    def __init__(self, ct):
+    def __init__(self, ct, core_pos: tuple[int, int] | None = None):
         self.w = ct.get_map_width()
         self.h = ct.get_map_height()
-        cp = ct.get_position()
-        self.my_core = (cp.x, cp.y)
+        if core_pos is None:
+            cp = ct.get_position()
+            self.my_core = (cp.x, cp.y)
+        else:
+            self.my_core = (core_pos[0], core_pos[1])
         
         self.possible = {101, 102, 103}
         self.map_history = {} 
@@ -32,16 +35,33 @@ class SymmetryAnalyzer:
 
         self._check_axis_overlap()
 
+    def update_core_pos(self, core_pos: tuple[int, int]) -> None:
+        new_core = (core_pos[0], core_pos[1])
+        if new_core == self.my_core:
+            return
+        self.my_core = new_core
+        self._check_axis_overlap()
+
     def _check_axis_overlap(self):
         cx, cy = (self.w - 1) / 2.0, (self.h - 1) / 2.0
-        if abs(self.my_core[0] - cx) < 0.1:
+        core_x, core_y = self.my_core
+
+        # 3x3 core footprint reaches one tile from its center, so if the
+        # center is within 1 tile of an axis, the footprint overlaps that band.
+        if abs(core_x - cx) <= 1.0 and 101 in self.possible:
             self.possible.discard(101)
             if DEBUG_PRINTS:
-                print(f"[Bot {self.my_core}] Init: ruled out REF_X — core sits on vertical centre axis", file=sys.stderr)
-        if abs(self.my_core[1] - cy) < 0.1:
+                print(
+                    f"[Bot {self.my_core}] Init: ruled out REF_X — 3x3 core overlaps vertical axis band",
+                    file=sys.stderr,
+                )
+        if abs(core_y - cy) <= 1.0 and 102 in self.possible:
             self.possible.discard(102)
             if DEBUG_PRINTS:
-                print(f"[Bot {self.my_core}] Init: ruled out REF_Y — core sits on horizontal centre axis", file=sys.stderr)
+                print(
+                    f"[Bot {self.my_core}] Init: ruled out REF_Y — 3x3 core overlaps horizontal axis band",
+                    file=sys.stderr,
+                )
 
     def _get_mirror(self, x, y, sym):
         if sym == 101: return (self.w - 1 - x, y)
