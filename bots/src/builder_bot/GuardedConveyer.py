@@ -19,30 +19,50 @@ class GuardedConveyer:
         self.last_known_ore: Position | None = None
         self.step_index = 0
         self.complete = False
+        self.no_ore_in_scan = False
+        self.was_on_core_last_turn = False
+        self.pending_underfoot_core_link = False
 
     def run(self, ct: Controller, nearby_tiles: list[Position]) -> tuple[bool, bool]:
         """
         Returns:
             (acted_this_round, failed_plan)
         """
+        my_pos = ct.get_position()
+        on_core_now = self._is_on_friendly_core(ct, my_pos)
+        had_core_last_turn = self.was_on_core_last_turn
+
+        self.no_ore_in_scan = False
         self._log(
             ct,
             (
-                f"run start: complete={self.complete}, "
-                f"target={self.ore_target}, step={self.step_index}/{len(self.path)}"
+                f"run start: complete={self.complete}, target={self.ore_target}, "
+                f"step={self.step_index}/{len(self.path)}, on_core_now={on_core_now}, "
+                f"was_on_core_last_turn={had_core_last_turn}"
             ),
         )
 
         if self.complete:
             self._log(ct, "already complete, nothing to do")
-            return False, False
+            return self._finish_turn(on_core_now, False, False)
 
         if self.ore_target is None:
+            self.no_ore_in_scan = len(self._visible_ore_tiles(ct, nearby_tiles)) == 0
             self._log(ct, "no target yet, planning from core")
-            if not self._plan_from_core(ct, nearby_tiles):
+            if not self._plan_from_core(ct, nearby_tiles, on_core_now, had_core_last_turn):
                 # Planning failure is transient: keep scanning every round.
                 self._log(ct, "planning failed this round, will retry next round")
-                return False, False
+                return self._finish_turn(on_core_now, False, False)
+
+            if had_core_last_turn and not on_core_now:
+                self.pending_underfoot_core_link = True
+
+        if self.pending_underfoot_core_link:
+            acted, done = self._swap_underfoot_to_core_conveyor(ct)
+            if done:
+                self.pending_underfoot_core_link = False
+            # Spend this turn linking underfoot tile to the core.
+            return self._finish_turn(on_core_now, True, False)
 
         acted, failed = self._execute_plan(ct)
         if failed:
@@ -51,18 +71,29 @@ class GuardedConveyer:
             self.path = []
             self.ore_target = None
             self.step_index = 0
-            return acted, False
+            self.pending_underfoot_core_link = False
+            return self._finish_turn(on_core_now, acted, False)
         self._log(ct, f"execution result: acted={acted}, failed={failed}")
-        return acted, False
+        return self._finish_turn(on_core_now, acted, False)
 
-    def _plan_from_core(self, ct: Controller, nearby_tiles: list[Position]) -> bool:
+    def _plan_from_core(
+        self,
+        ct: Controller,
+        nearby_tiles: list[Position],
+        on_core_now: bool,
+        had_core_last_turn: bool,
+    ) -> bool:
         my_pos = ct.get_position()
-        if not self._is_on_friendly_core(ct, my_pos):
-            self._log(ct, f"plan rejected: not standing on friendly core at {my_pos}")
+        if not on_core_now and not had_core_last_turn:
+            self._log(
+                ct,
+                f"plan rejected: not on core now and was not on core last turn at {my_pos}",
+            )
             return False
 
         ore_tiles = self._visible_ore_tiles(ct, nearby_tiles)
         if not ore_tiles:
+            self.no_ore_in_scan = True
             self._log(ct, "plan rejected: no visible ore in current vision scan")
             return False
         self._log(ct, f"planning with {len(ore_tiles)} visible ore tile(s)")
@@ -363,6 +394,74 @@ class GuardedConveyer:
 
         return acted
 
+    def _swap_underfoot_to_core_conveyor(self, ct: Controller) -> tuple[bool, bool]:
+        my_pos = ct.get_position()
+        core_pos = self._adjacent_cardinal_core_tile(ct, my_pos)
+        if core_pos is None:
+            self._log(ct, "underfoot swap skipped: no adjacent friendly core tile")
+            return False, True
+
+        desired_dir = my_pos.direction_to(core_pos)
+        if desired_dir not in CARDINAL_DIRECTIONS:
+            self._log(ct, f"underfoot swap skipped: non-cardinal direction {desired_dir}")
+            return False, True
+
+        acted = False
+
+        building_id = ct.get_tile_building_id(my_pos)
+        if building_id is not None:
+            b_type = ct.get_entity_type(building_id)
+            b_team = ct.get_team(building_id)
+
+            if b_type == EntityType.CONVEYOR and b_team == ct.get_team():
+                try:
+                    if ct.get_direction(building_id) == desired_dir:
+                        self._log(
+                            ct,
+                            f"underfoot conveyor already correct at {my_pos} -> {desired_dir}",
+                        )
+                        return False, True
+                except Exception:
+                    pass
+
+            if b_type != EntityType.CORE and b_team == ct.get_team() and ct.can_destroy(my_pos):
+                ct.destroy(my_pos)
+                acted = True
+                self._log(ct, f"underfoot swap destroyed allied {b_type} at {my_pos}")
+
+        marker_id = self._find_marker_at(ct, my_pos)
+        if marker_id is not None and ct.can_destroy(my_pos):
+            ct.destroy(my_pos)
+            acted = True
+            self._log(ct, f"underfoot swap destroyed marker at {my_pos}")
+
+        if ct.get_action_cooldown() == 0 and ct.can_build_conveyor(my_pos, desired_dir):
+            ct.build_conveyor(my_pos, desired_dir)
+            self._log(ct, f"underfoot swap built conveyor at {my_pos} facing {desired_dir}")
+            return True, True
+
+        self._log(
+            ct,
+            (
+                f"underfoot swap waiting: can_build={ct.can_build_conveyor(my_pos, desired_dir)}, "
+                f"action_cd={ct.get_action_cooldown()}"
+            ),
+        )
+        return acted, False
+
+    def _adjacent_cardinal_core_tile(self, ct: Controller, pos: Position) -> Position | None:
+        for d in CARDINAL_DIRECTIONS:
+            check = pos.add(d)
+            building_id = ct.get_tile_building_id(check)
+            if building_id is None:
+                continue
+            if (
+                ct.get_entity_type(building_id) == EntityType.CORE
+                and ct.get_team(building_id) == ct.get_team()
+            ):
+                return check
+        return None
+
     @staticmethod
     def _find_marker_at(ct: Controller, pos: Position) -> int | None:
         for entity_id in ct.get_nearby_entities():
@@ -384,3 +483,12 @@ class GuardedConveyer:
             f"[GC id={ct.get_id()} r={ct.get_current_round()}] {msg}",
             file=sys.stderr,
         )
+
+    def _finish_turn(
+        self,
+        on_core_now: bool,
+        acted: bool,
+        failed: bool,
+    ) -> tuple[bool, bool]:
+        self.was_on_core_last_turn = on_core_now
+        return acted, failed

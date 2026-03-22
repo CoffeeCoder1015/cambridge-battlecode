@@ -3,6 +3,7 @@ from .TerrainMemory import SymmetryAnalyzer
 from .PropogateSymmetry import SignalPropagator
 from .TangentBug import TangentBug
 from .GuardedConveyer import GuardedConveyer
+from .GaurdedConveryMove import GaurdedConveryMove
 
 import sys
 import random
@@ -18,6 +19,7 @@ class BuilderBot:
         self.known_symmetry = None
         self.nav = TangentBug()
         self.guarded_conveyer = GuardedConveyer()
+        self.gaurded_convery_move = GaurdedConveryMove()
         self._target_set = False
         self.agentmode = None
 
@@ -52,6 +54,16 @@ class BuilderBot:
         guarded_acted = False
         if self.agentmode == "GUARDED_CONVEYER":
             guarded_acted, guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
+            if not guarded_acted and self.guarded_conveyer.no_ore_in_scan:
+                guarded_acted = self.gaurded_convery_move.run(ct)
+                if ct.get_current_round() < 100:
+                    print(
+                        (
+                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
+                            f"no ore in scan -> random cardinal move acted={guarded_acted}"
+                        ),
+                        file=sys.stderr,
+                    )
             if ct.get_current_round() < 100:
                 print(
                     (
