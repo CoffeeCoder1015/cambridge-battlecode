@@ -16,6 +16,7 @@ class GuardedConveyer:
         self._generator_pos: Position | None = None
         self._starting_position: Position | None = None
         self._has_relocated = False
+        self._has_returned_to_start = False
 
     def run(self, ct: Controller, known_symmetry, symmetry_analyzer) -> bool:
         """
@@ -75,6 +76,7 @@ class GuardedConveyer:
         self._generator_pos = adjacent_ores[0]
         self._starting_position = my_pos
         self._has_relocated = False
+        self._has_returned_to_start = False
         self._dbg(
             ct,
             "locked setup",
@@ -139,10 +141,87 @@ class GuardedConveyer:
             )
             return True
 
-        wall_target = self._get_next_wall_target(ct, generator_pos, starting_pos)
-        if wall_target is not None and ct.can_build_barrier(wall_target):
-            self._dbg(ct, "building barrier", f"at={self._fmt_pos(wall_target)}")
-            ct.build_barrier(wall_target)
+        if not self._has_returned_to_start:
+            wall_target = self._get_next_wall_target(
+                ct,
+                generator_pos,
+                starting_pos,
+                include_starting_pos=False,
+            )
+            if wall_target is not None:
+                if self._prepare_tile_for_barrier(ct, wall_target):
+                    return True
+                if ct.can_build_barrier(wall_target):
+                    self._dbg(ct, "building barrier", f"at={self._fmt_pos(wall_target)}")
+                    ct.build_barrier(wall_target)
+                    return True
+                self._dbg(
+                    ct,
+                    "barrier blocked",
+                    f"at={self._fmt_pos(wall_target)} can_build_barrier=False",
+                )
+                return True
+
+            if self._same_pos(ct.get_position(), starting_pos):
+                self._has_returned_to_start = True
+                self._dbg(ct, "at starting_pos", f"start={self._fmt_pos(starting_pos)}")
+                return True
+
+            back_dir = self._get_greedy_step(ct, ct.get_position(), starting_pos)
+            if back_dir is not None:
+                back_to = ct.get_position().add(back_dir)
+                if not self._has_friendly_road(ct, back_to):
+                    if ct.can_build_road(back_to):
+                        self._dbg(ct, "building return road", f"at={self._fmt_pos(back_to)}")
+                        ct.build_road(back_to)
+                    else:
+                        self._dbg(
+                            ct,
+                            "return road blocked",
+                            f"target={self._fmt_pos(back_to)} can_build_road=False",
+                        )
+                if ct.can_move(back_dir):
+                    self._dbg(
+                        ct,
+                        "returning to start",
+                        f"dir={back_dir} from={self._fmt_pos(ct.get_position())} to={self._fmt_pos(back_to)}",
+                    )
+                    ct.move(back_dir)
+                    if self._same_pos(back_to, starting_pos):
+                        self._has_returned_to_start = True
+                    return True
+                self._dbg(
+                    ct,
+                    "return move blocked",
+                    f"dir={back_dir} target={self._fmt_pos(back_to)} can_move=False",
+                )
+                return True
+
+            self._dbg(
+                ct,
+                "cannot path to start",
+                f"current={self._fmt_pos(ct.get_position())} start={self._fmt_pos(starting_pos)}",
+            )
+            return True
+
+        final_wall_target = self._get_next_wall_target(
+            ct,
+            generator_pos,
+            starting_pos,
+            include_starting_pos=True,
+        )
+        if final_wall_target is not None:
+            if self._prepare_tile_for_barrier(ct, final_wall_target):
+                return True
+            if ct.can_build_barrier(final_wall_target):
+                self._dbg(ct, "building final barrier", f"at={self._fmt_pos(final_wall_target)}")
+                ct.build_barrier(final_wall_target)
+                return True
+            self._dbg(
+                ct,
+                "final barrier blocked",
+                f"at={self._fmt_pos(final_wall_target)} can_build_barrier=False",
+            )
             return True
 
         # Setup complete; do not fall back to roaming logic.
@@ -302,23 +381,105 @@ class GuardedConveyer:
         ct: Controller,
         generator_pos: Position,
         starting_pos: Position,
+        include_starting_pos: bool,
     ) -> Position | None:
         neighbors: list[Position] = []
         for d in self.MOVE_DIRECTIONS:
             p = generator_pos.add(d)
             if not ct.is_in_vision(p):
                 continue
-            if p.x == starting_pos.x and p.y == starting_pos.y:
+            if (not include_starting_pos) and p.x == starting_pos.x and p.y == starting_pos.y:
                 continue
             if self._dist_sq(ct.get_position(), p) > self.ACTION_RADIUS_SQ:
                 continue
+            # Never overwrite generator tile or core.
+            building_id = ct.get_tile_building_id(p)
+            if building_id is not None:
+                etype = ct.get_entity_type(building_id)
+                if etype in (EntityType.HARVESTER, EntityType.CORE):
+                    continue
             neighbors.append(p)
 
         neighbors.sort(key=lambda p: (self._dist_sq(ct.get_position(), p), p.x, p.y))
         for p in neighbors:
-            if ct.can_build_barrier(p):
+            if ct.can_build_barrier(p) or self._is_friendly_clearable_blocker(ct, p):
                 return p
         return None
+
+    def _is_friendly_clearable_blocker(self, ct: Controller, pos: Position) -> bool:
+        if self._has_friendly_marker_at_pos(ct, pos):
+            return ct.can_destroy(pos)
+
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+        if ct.get_team(building_id) != ct.get_team():
+            return False
+        if ct.get_entity_type(building_id) != EntityType.ROAD:
+            return False
+        return ct.can_destroy(pos)
+
+    def _prepare_tile_for_barrier(self, ct: Controller, pos: Position) -> bool:
+        """
+        Try to clear friendly blockers that prevent barrier placement.
+        Returns True if we consumed the turn.
+        """
+        if ct.can_build_barrier(pos):
+            return False
+
+        if self._has_friendly_marker_at_pos(ct, pos):
+            if ct.can_destroy(pos):
+                self._dbg(ct, "destroying blocker", f"at={self._fmt_pos(pos)} type={EntityType.MARKER}")
+                ct.destroy(pos)
+                return True
+            self._dbg(
+                ct,
+                "cannot destroy blocker",
+                f"at={self._fmt_pos(pos)} type={EntityType.MARKER}",
+            )
+            return False
+
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+
+        if ct.get_team(building_id) != ct.get_team():
+            return False
+
+        blocker_type = ct.get_entity_type(building_id)
+        if blocker_type not in (EntityType.ROAD, EntityType.MARKER):
+            return False
+
+        if ct.can_destroy(pos):
+            self._dbg(
+                ct,
+                "destroying blocker",
+                f"at={self._fmt_pos(pos)} type={blocker_type}",
+            )
+            ct.destroy(pos)
+            return True
+
+        self._dbg(
+            ct,
+            "cannot destroy blocker",
+            f"at={self._fmt_pos(pos)} type={blocker_type}",
+        )
+        return False
+
+    def _has_friendly_marker_at_pos(self, ct: Controller, pos: Position) -> bool:
+        for entity_id in ct.get_nearby_entities():
+            if ct.get_entity_type(entity_id) != EntityType.MARKER:
+                continue
+            if ct.get_team(entity_id) != ct.get_team():
+                continue
+            marker_pos = ct.get_position(entity_id)
+            if marker_pos.x == pos.x and marker_pos.y == pos.y:
+                return True
+        return False
+
+    @staticmethod
+    def _same_pos(a: Position, b: Position) -> bool:
+        return a.x == b.x and a.y == b.y
 
     def _dbg(self, ct: Controller, stage: str, extra: str) -> None:
         if not self.DEBUG_PRINTS_ENABLED:
