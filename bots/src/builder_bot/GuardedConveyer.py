@@ -11,6 +11,8 @@ CARDINAL_DIRECTIONS = (
     Direction.WEST,
 )
 
+DEBUG_PRINTS = False
+
 
 class GuardedConveyer:
     def __init__(self) -> None:
@@ -263,7 +265,8 @@ class GuardedConveyer:
             if self._is_on_friendly_core(ct, my_pos):
                 self.ore_finalize_phase = None
                 self.complete = True
-                print("done!", file=sys.stderr)
+                if DEBUG_PRINTS:
+                    print("done!", file=sys.stderr)
                 return False, False
 
             acted, done = self._fortify_backfill_ring(ct, my_pos)
@@ -820,6 +823,8 @@ class GuardedConveyer:
 
     @staticmethod
     def _log(ct: Controller, msg: str) -> None:
+        if not DEBUG_PRINTS:
+            return
         if ct.get_current_round() >= 100:
             return
         print(
