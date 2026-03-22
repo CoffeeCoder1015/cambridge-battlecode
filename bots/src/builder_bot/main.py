@@ -34,6 +34,8 @@ class BuilderBot:
         """
         if ct.get_current_round() == 1:
             self.agentmode = "GUARDED_CONVEYER"
+
+        nearby_tiles = ct.get_nearby_tiles()
         '''
         SYMMETRY ANALYSIS & PROPAGATION 
         '''
@@ -41,7 +43,7 @@ class BuilderBot:
         # Try to find symmetry based on surroundings
         self.known_symmetry = self.symmetry_analyzer.update(ct)
         # Read markers and propagate signal back to core
-        self.signal_propagator.process_and_propagate(ct, self.known_symmetry)
+        #self.signal_propagator.process_and_propagate(ct, self.known_symmetry)
 
 
         '''
@@ -49,7 +51,25 @@ class BuilderBot:
         '''
         guarded_acted = False
         if self.agentmode == "GUARDED_CONVEYER":
-            pass
+            guarded_acted, guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
+            if ct.get_current_round() < 100:
+                print(
+                    (
+                        f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
+                        f"guarded_mode acted={guarded_acted} failed={guarded_failed}"
+                    ),
+                    file=sys.stderr,
+                )
+            if guarded_failed:
+                if ct.get_current_round() < 100:
+                    print(
+                        (
+                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
+                            "guarded mode reported hard failure; will keep retrying"
+                        ),
+                        file=sys.stderr,
+                    )
+
 
 
 
