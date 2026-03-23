@@ -1,10 +1,10 @@
 from cambc import Controller, Direction, EntityType, Environment
-from .TerrainMemory import SymmetryAnalyzer
-from .PropogateSymmetry import SignalPropagator
-from .TangentBug import TangentBug
-from .GuardedConveyer import GuardedConveyer
-from .GaurdedConveryMove import GaurdedConveryMove
-from .Hound import Hound
+from .Symmetry.TerrainMemory import SymmetryAnalyzer
+from .Symmetry.PropogateSymmetry import SignalPropagator
+from .Movement.TangentBug import TangentBug
+from .GuardedConveyer.GuardedConveyer import GuardedConveyer
+from .GuardedConveyer.GaurdedConveryMove import GaurdedConveryMove
+from .Movement.Hound import Hound
 
 import sys
 import random
