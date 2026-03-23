@@ -28,7 +28,7 @@ class BridgeBuilder:
         del known_symmetry
 
         if self._post_bridge_target is not None:
-            return self._advance_post_bridge_navigation(ct)
+            return self._advance_post_bridge_navigation(ct, core_pos)
 
         if self._post_generator_bridge_pending:
             return self._run_post_generator_bridge(ct, core_pos)
@@ -251,33 +251,41 @@ class BridgeBuilder:
         if core_pos is None:
             return True
 
-        if ct.get_action_cooldown() != 0:
-            return True
-
         start_pos = ct.get_position()
+        self._clear_underfoot_for_bridge(ct, start_pos)
+
         target_pos = self._select_bridge_target_toward_core(
             ct=ct,
             start_pos=start_pos,
             core_pos=core_pos,
         )
         if target_pos is None:
-            self._post_generator_bridge_pending = False
+            self._clear_post_bridge_state()
+            return True
+
+        if ct.get_action_cooldown() != 0:
             return True
 
         if ct.can_build_bridge(start_pos, target_pos):
             ct.build_bridge(start_pos, target_pos)
+            if self._is_on_friendly_core(ct, target_pos):
+                self._clear_post_bridge_state()
+                return True
             self._post_generator_bridge_pending = False
             self._start_post_bridge_navigation(target_pos)
-            self._advance_post_bridge_navigation(ct)
+            self._advance_post_bridge_navigation(ct, core_pos)
             return True
 
         # Some tiles (for example roads) can block bridge placement on the start tile.
         if self._clear_underfoot_for_bridge(ct, start_pos):
             if ct.can_build_bridge(start_pos, target_pos):
                 ct.build_bridge(start_pos, target_pos)
+                if self._is_on_friendly_core(ct, target_pos):
+                    self._clear_post_bridge_state()
+                    return True
                 self._post_generator_bridge_pending = False
                 self._start_post_bridge_navigation(target_pos)
-                self._advance_post_bridge_navigation(ct)
+                self._advance_post_bridge_navigation(ct, core_pos)
                 return True
 
         return True
@@ -286,7 +294,11 @@ class BridgeBuilder:
         self._post_bridge_target = (target_pos.x, target_pos.y)
         self._post_bridge_nav.set_target(target_pos.x, target_pos.y)
 
-    def _advance_post_bridge_navigation(self, ct: Controller) -> bool:
+    def _advance_post_bridge_navigation(
+        self,
+        ct: Controller,
+        core_pos: tuple[int, int] | None,
+    ) -> bool:
         if self._post_bridge_target is None:
             return True
 
@@ -295,6 +307,10 @@ class BridgeBuilder:
         if (my_pos.x, my_pos.y) == (tx, ty):
             self._post_bridge_target = None
             self._post_bridge_nav.reset()
+            self._post_generator_bridge_pending = True
+            return self._run_post_generator_bridge(ct, core_pos)
+
+        if core_pos is None:
             return True
 
         if self._post_bridge_nav.target != (tx, ty):
@@ -310,6 +326,8 @@ class BridgeBuilder:
         if (new_pos.x, new_pos.y) == (tx, ty):
             self._post_bridge_target = None
             self._post_bridge_nav.reset()
+            self._post_generator_bridge_pending = True
+            return self._run_post_generator_bridge(ct, core_pos)
         return True
 
     def _select_bridge_target_toward_core(
@@ -363,6 +381,21 @@ class BridgeBuilder:
             return True
 
         return False
+
+    def _clear_post_bridge_state(self) -> None:
+        self._post_generator_bridge_pending = False
+        self._post_bridge_target = None
+        self._post_bridge_nav.reset()
+
+    @staticmethod
+    def _is_on_friendly_core(ct: Controller, pos: Position) -> bool:
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+        return (
+            ct.get_entity_type(building_id) == EntityType.CORE
+            and ct.get_team(building_id) == ct.get_team()
+        )
 
     @staticmethod
     def _road_then_move(ct: Controller, move_dir: Direction) -> bool:
