@@ -1,16 +1,12 @@
-from cambc import Controller, Direction, EntityType, Environment
+from cambc import Controller
 from .Symmetry.TerrainMemory import SymmetryAnalyzer
 from .Symmetry.PropogateSymmetry import SignalPropagator
 from .Movement.TangentBug import TangentBug
 from .GuardedConveyer.GuardedConveyer import GuardedConveyer
 from .GuardedConveyer.GaurdedConveryMove import GaurdedConveryMove
 from .Movement.Hound import Hound
+from .helpers import execute_nav_step, refresh_core_pos, set_nav_target
 
-import sys
-import random
-
-
-DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 DEBUG_PRINTS = False
 
 
@@ -31,7 +27,7 @@ class BuilderBot:
 
     def run(self, ct: Controller) -> None:
 
-        self._refresh_core_pos(ct)
+        self.core_pos = refresh_core_pos(ct, self.core_pos)
 
         if self.symmetry_analyzer is None:
             self.symmetry_analyzer = SymmetryAnalyzer(ct, core_pos=self.core_pos)
@@ -73,47 +69,14 @@ class BuilderBot:
         '''
         guarded_acted = False
         if self.agentmode == "GUARDED_CONVEYER":
-            guarded_acted, guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
+            guarded_acted, _guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
             if (
                 not guarded_acted
                 and self.guarded_conveyer.should_suppress_main_movement(ct)
             ):
                 guarded_acted = True
-                if DEBUG_PRINTS and ct.get_current_round() < 100:
-                    print(
-                        (
-                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                            "suppressing fallback movement during ore finalize sequence"
-                        ),
-                        file=sys.stderr,
-                    )
             if not guarded_acted and self.guarded_conveyer.no_ore_in_scan:
                 guarded_acted = self.gaurded_convery_move.run(ct)
-                if DEBUG_PRINTS and ct.get_current_round() < 100:
-                    print(
-                        (
-                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                            f"no ore in scan -> random cardinal move acted={guarded_acted}"
-                        ),
-                        file=sys.stderr,
-                    )
-            if DEBUG_PRINTS and ct.get_current_round() < 100:
-                print(
-                    (
-                        f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                        f"guarded_mode acted={guarded_acted} failed={guarded_failed}"
-                    ),
-                    file=sys.stderr,
-                )
-            if guarded_failed:
-                if DEBUG_PRINTS and ct.get_current_round() < 100:
-                    print(
-                        (
-                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                            "guarded mode reported hard failure; will keep retrying"
-                        ),
-                        file=sys.stderr,
-                    )
 
         '''
         HOUND MODE
@@ -138,47 +101,14 @@ class BuilderBot:
                 self._set_nav_target(ct.get_map_width() // 2, ct.get_map_height() // 2)
             self._execute_nav_step(ct)
 
-    def _refresh_core_pos(self, ct: Controller) -> None:
-        for b_id in ct.get_nearby_buildings():
-            try:
-                if (
-                    ct.get_entity_type(b_id) == EntityType.CORE
-                    and ct.get_team(b_id) == ct.get_team()
-                ):
-                    pos = ct.get_position(b_id)
-                    self.core_pos = (pos.x, pos.y)
-                    return
-            except Exception:
-                continue
-
     def _set_nav_target(self, tx: int, ty: int) -> None:
-        next_target = (tx, ty)
-        if self._last_nav_target != next_target:
-            self.nav.set_target(tx, ty)
-            self._last_nav_target = next_target
-        self._target_set = True
+        self._last_nav_target, self._target_set = set_nav_target(
+            nav=self.nav,
+            last_nav_target=self._last_nav_target,
+            tx=tx,
+            ty=ty,
+        )
 
     def _execute_nav_step(self, ct: Controller) -> bool:
-        move_dir = self.nav.next_move(ct)
-        if move_dir is None:
-            return False
-
-        acted = False
-        move_pos = ct.get_position().add(move_dir)
-        if not ct.is_tile_passable(move_pos):
-            has_friendly_marker = any(
-                ct.get_entity_type(eid) == EntityType.MARKER
-                and ct.get_team(eid) == ct.get_team()
-                and ct.get_position(eid) == move_pos
-                for eid in ct.get_nearby_entities()
-            )
-            if ct.can_build_road(move_pos) and not has_friendly_marker:
-                ct.build_road(move_pos)
-                acted = True
-
-        if ct.can_move(move_dir):
-            ct.move(move_dir)
-            acted = True
-
-        return acted
+        return execute_nav_step(ct, self.nav)
 

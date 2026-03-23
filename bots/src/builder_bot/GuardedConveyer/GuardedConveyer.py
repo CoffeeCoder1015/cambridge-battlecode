@@ -1,5 +1,4 @@
 from collections import deque
-import sys
 
 from cambc import Controller, Direction, EntityType, Environment, Position
 
@@ -10,9 +9,6 @@ CARDINAL_DIRECTIONS = (
     Direction.SOUTH,
     Direction.WEST,
 )
-
-DEBUG_PRINTS = False
-
 
 class GuardedConveyer:
     def __init__(self) -> None:
@@ -265,8 +261,7 @@ class GuardedConveyer:
             if self._is_on_friendly_core(ct, my_pos):
                 self.ore_finalize_phase = None
                 self.complete = True
-                if DEBUG_PRINTS:
-                    print("done!", file=sys.stderr)
+                self._log(ct, "backfill complete: arrived on core")
                 return False, False
 
             acted, done = self._fortify_backfill_ring(ct, my_pos)
@@ -831,14 +826,8 @@ class GuardedConveyer:
 
     @staticmethod
     def _log(ct: Controller, msg: str) -> None:
-        if not DEBUG_PRINTS:
-            return
-        if ct.get_current_round() >= 100:
-            return
-        print(
-            f"[GC id={ct.get_id()} r={ct.get_current_round()}] {msg}",
-            file=sys.stderr,
-        )
+        _ = ct
+        _ = msg
 
     def _finish_turn(
         self,
