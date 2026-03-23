@@ -1,18 +1,22 @@
+import sys
 from typing import Any, Callable
 
 from cambc import Controller, Direction, EntityType, Environment, Position
 from ..Movement.TangentBug import TangentBug
 
 ORE_ENVS = (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE)
-ACTION_RADIUS_SQ = 4
+ACTION_RADIUS_SQ = 2
 MAX_GREEDY_MOVES = 7  # strictly less than 8
+BRIDGE_BUILDER_DEBUG_PRINTS = True
 
 
 class BridgeBuilder:
     def __init__(self) -> None:
+        self.debug_prints = BRIDGE_BUILDER_DEBUG_PRINTS
         self.ore_target: tuple[int, int] | None = None
         self._post_generator_bridge_pending = False
         self._post_bridge_target: tuple[int, int] | None = None
+        self._resume_bfs_after_bridge = False
         self._post_bridge_nav = TangentBug()
 
     def main(
@@ -26,24 +30,57 @@ class BridgeBuilder:
         set_nav_target: Callable[[int, int], None] | None = None,
     ) -> bool:
         del known_symmetry
+        my_pos = ct.get_position()
+        self._log(
+            ct,
+            (
+                f"main pos=({my_pos.x},{my_pos.y}) ore_target={self.ore_target} "
+                f"post_bridge_target={self._post_bridge_target} "
+                f"post_bridge_pending={self._post_generator_bridge_pending} "
+                f"resume_bfs={self._resume_bfs_after_bridge}"
+            ),
+        )
 
         if self._post_bridge_target is not None:
+            self._log(ct, "continuing post-bridge navigation")
             return self._advance_post_bridge_navigation(ct, core_pos)
 
         if self._post_generator_bridge_pending:
+            self._log(ct, "running post-generator bridge cycle")
             return self._run_post_generator_bridge(ct, core_pos)
 
-        my_pos = ct.get_position()
+        if self._resume_bfs_after_bridge:
+            self._resume_bfs_after_bridge = False
+            self.ore_target = None
+            self._log(ct, "bridge cycle complete at core, re-entering BFS exploration")
+            return self._run_bfs_fallback(
+                ct=ct,
+                core_pos=core_pos,
+                bfs_builder=bfs_builder,
+                nav=nav,
+                set_nav_target=set_nav_target,
+            )
+
         visible_ores = self._visible_ores_from_scan(ct, symmetry_analyzer)
+        self._log(ct, f"visible ores in scan={len(visible_ores)} {sorted(visible_ores)}")
 
         if self.ore_target is not None:
             if self.ore_target not in visible_ores:
+                self._log(ct, f"dropping ore target {self.ore_target} (no longer visible)")
+                self.ore_target = None
+            elif self._ore_has_completed_extractor(
+                ct,
+                Position(self.ore_target[0], self.ore_target[1]),
+            ):
+                self._log(ct, f"dropping ore target {self.ore_target} (already harvested)")
                 self.ore_target = None
 
         if self.ore_target is None:
             self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores)
+            self._log(ct, f"selected reachable ore target={self.ore_target}")
 
         if self.ore_target is None:
+            self._log(ct, "no reachable ore, falling back to BFS exploration")
             return self._run_bfs_fallback(
                 ct=ct,
                 core_pos=core_pos,
@@ -55,15 +92,20 @@ class BridgeBuilder:
         ore_pos = Position(self.ore_target[0], self.ore_target[1])
 
         if self._in_action_radius(my_pos, ore_pos):
+            self._log(ct, f"ore {self.ore_target} in action radius, trying build")
             built = self._build_generator_on_ore(ct, ore_pos)
             if built:
                 self.ore_target = None
                 self._post_generator_bridge_pending = True
+                self._log(ct, "generator placed, entering post-generator bridge cycle")
+            else:
+                self._log(ct, "generator build not possible this turn")
             # Keep control while in range so fallback movement does not pull us off target.
             return True
 
         path = self._greedy_path_to_ore(ct, my_pos, ore_pos, MAX_GREEDY_MOVES)
         if path is None:
+            self._log(ct, f"could not greedy path to ore {self.ore_target}, returning to BFS")
             self.ore_target = None
             return self._run_bfs_fallback(
                 ct=ct,
@@ -74,8 +116,10 @@ class BridgeBuilder:
             )
 
         if not path:
+            self._log(ct, "already effectively in range (empty path), holding control")
             return True
 
+        self._log(ct, f"greedy move toward ore via {path[0]}")
         self._road_then_move(ct, path[0])
         return True
 
@@ -92,6 +136,7 @@ class BridgeBuilder:
             return visible
 
         # Fallback if scan state is unavailable.
+        self._log(ct, "symmetry map_history unavailable, using nearby tile scan fallback")
         for tile in ct.get_nearby_tiles():
             try:
                 env = ct.get_tile_env(tile)
@@ -112,14 +157,21 @@ class BridgeBuilder:
 
         for ox, oy in visible_ores:
             ore_pos = Position(ox, oy)
+            if self._ore_has_completed_extractor(ct, ore_pos):
+                self._log(ct, f"ore {(ox, oy)} rejected: harvester/generator already present")
+                continue
             path = self._greedy_path_to_ore(ct, my_pos, ore_pos, MAX_GREEDY_MOVES)
             if path is None:
+                self._log(ct, f"ore {(ox, oy)} rejected: no greedy path within <8 moves")
                 continue
             path_len = len(path)
+            self._log(ct, f"ore {(ox, oy)} candidate path_len={path_len}")
             if best_len is None or path_len < best_len:
                 best_len = path_len
                 best_target = (ox, oy)
 
+        if best_target is not None:
+            self._log(ct, f"best ore picked={best_target} with path_len={best_len}")
         return best_target
 
     def _greedy_path_to_ore(
@@ -130,6 +182,7 @@ class BridgeBuilder:
         max_moves: int,
     ) -> list[Direction] | None:
         if self._in_action_radius(start, ore_pos):
+            self._log(ct, f"already in action radius of ore ({ore_pos.x},{ore_pos.y})")
             return []
 
         cur = Position(start.x, start.y)
@@ -154,6 +207,10 @@ class BridgeBuilder:
                     best_dir = move_dir
 
             if best_dir is None:
+                self._log(
+                    ct,
+                    f"greedy path failed from ({cur.x},{cur.y}) to ore ({ore_pos.x},{ore_pos.y})",
+                )
                 return None
 
             cur = cur.add(best_dir)
@@ -161,8 +218,13 @@ class BridgeBuilder:
             visited.add((cur.x, cur.y))
 
             if self._in_action_radius(cur, ore_pos):
+                self._log(
+                    ct,
+                    f"greedy path success to ore ({ore_pos.x},{ore_pos.y}) in {len(path)} moves",
+                )
                 return path
 
+        self._log(ct, f"greedy path exceeded max_moves={max_moves} for ore ({ore_pos.x},{ore_pos.y})")
         return None
 
     @staticmethod
@@ -226,7 +288,14 @@ class BridgeBuilder:
         return dx * dx + dy * dy <= ACTION_RADIUS_SQ
 
     def _build_generator_on_ore(self, ct: Controller, ore_pos: Position) -> bool:
+        self._clear_ore_build_obstructions(ct, ore_pos)
+
+        if self._ore_has_completed_extractor(ct, ore_pos):
+            self._log(ct, f"ore already has harvester/generator at ({ore_pos.x},{ore_pos.y})")
+            return False
+
         if ct.get_action_cooldown() != 0:
+            self._log(ct, f"build blocked by action cooldown={ct.get_action_cooldown()}")
             return False
 
         can_build_generator = getattr(ct, "can_build_generator", None)
@@ -234,13 +303,63 @@ class BridgeBuilder:
         if callable(can_build_generator) and callable(build_generator):
             if can_build_generator(ore_pos):
                 build_generator(ore_pos)
+                self._log(ct, f"built generator at ({ore_pos.x},{ore_pos.y})")
                 return True
+            self._log(ct, f"generator API available but cannot build at ({ore_pos.x},{ore_pos.y})")
 
         # Backward-compatible fallback where ore extraction uses harvester API.
         if ct.can_build_harvester(ore_pos):
             ct.build_harvester(ore_pos)
+            self._log(ct, f"built harvester at ({ore_pos.x},{ore_pos.y})")
             return True
 
+        self._log(ct, f"cannot build generator/harvester at ({ore_pos.x},{ore_pos.y})")
+        return False
+
+    def _ore_has_completed_extractor(self, ct: Controller, ore_pos: Position) -> bool:
+        building_id = ct.get_tile_building_id(ore_pos)
+        if building_id is None:
+            return False
+
+        b_type = ct.get_entity_type(building_id)
+        if b_type == EntityType.HARVESTER:
+            return True
+
+        generator_type = getattr(EntityType, "GENERATOR", None)
+        return generator_type is not None and b_type == generator_type
+
+    def _clear_ore_build_obstructions(self, ct: Controller, ore_pos: Position) -> bool:
+        acted = False
+
+        building_id = ct.get_tile_building_id(ore_pos)
+        if building_id is not None:
+            b_type = ct.get_entity_type(building_id)
+            b_team = ct.get_team(building_id)
+            if (
+                b_team == ct.get_team()
+                and b_type == EntityType.ROAD
+                and ct.can_destroy(ore_pos)
+            ):
+                ct.destroy(ore_pos)
+                acted = True
+                self._log(ct, f"cleared friendly road on ore ({ore_pos.x},{ore_pos.y})")
+
+        if self._has_friendly_marker_at(ct, ore_pos) and ct.can_destroy(ore_pos):
+            ct.destroy(ore_pos)
+            acted = True
+            self._log(ct, f"cleared friendly marker on ore ({ore_pos.x},{ore_pos.y})")
+
+        return acted
+
+    @staticmethod
+    def _has_friendly_marker_at(ct: Controller, pos: Position) -> bool:
+        for entity_id in ct.get_nearby_entities():
+            if ct.get_entity_type(entity_id) != EntityType.MARKER:
+                continue
+            if ct.get_team(entity_id) != ct.get_team():
+                continue
+            if ct.get_position(entity_id) == pos:
+                return True
         return False
 
     def _run_post_generator_bridge(
@@ -249,9 +368,11 @@ class BridgeBuilder:
         core_pos: tuple[int, int] | None,
     ) -> bool:
         if core_pos is None:
+            self._log(ct, "post-generator bridge paused: core_pos unknown")
             return True
 
         start_pos = ct.get_position()
+        self._log(ct, f"bridge-cycle start from ({start_pos.x},{start_pos.y})")
         self._clear_underfoot_for_bridge(ct, start_pos)
 
         target_pos = self._select_bridge_target_toward_core(
@@ -260,34 +381,49 @@ class BridgeBuilder:
             core_pos=core_pos,
         )
         if target_pos is None:
+            self._log(ct, "bridge-cycle ended: no bridge target candidate")
             self._clear_post_bridge_state()
             return True
 
+        self._log(ct, f"bridge-cycle target selected=({target_pos.x},{target_pos.y})")
         if ct.get_action_cooldown() != 0:
+            self._log(ct, f"bridge build blocked by action cooldown={ct.get_action_cooldown()}")
             return True
 
         if ct.can_build_bridge(start_pos, target_pos):
             ct.build_bridge(start_pos, target_pos)
+            self._log(ct, f"built bridge from ({start_pos.x},{start_pos.y}) to ({target_pos.x},{target_pos.y})")
             if self._is_on_friendly_core(ct, target_pos):
-                self._clear_post_bridge_state()
+                self._finish_bridge_cycle_to_core(ct)
                 return True
             self._post_generator_bridge_pending = False
             self._start_post_bridge_navigation(target_pos)
+            self._log(ct, "starting TangentBug movement toward bridge target")
             self._advance_post_bridge_navigation(ct, core_pos)
             return True
 
         # Some tiles (for example roads) can block bridge placement on the start tile.
         if self._clear_underfoot_for_bridge(ct, start_pos):
+            self._log(ct, "cleared underfoot tile and retrying bridge build")
             if ct.can_build_bridge(start_pos, target_pos):
                 ct.build_bridge(start_pos, target_pos)
+                self._log(
+                    ct,
+                    f"built bridge after clear from ({start_pos.x},{start_pos.y}) to ({target_pos.x},{target_pos.y})",
+                )
                 if self._is_on_friendly_core(ct, target_pos):
-                    self._clear_post_bridge_state()
+                    self._finish_bridge_cycle_to_core(ct)
                     return True
                 self._post_generator_bridge_pending = False
                 self._start_post_bridge_navigation(target_pos)
+                self._log(ct, "starting TangentBug movement toward bridge target")
                 self._advance_post_bridge_navigation(ct, core_pos)
                 return True
 
+        self._log(
+            ct,
+            f"cannot place bridge from ({start_pos.x},{start_pos.y}) to ({target_pos.x},{target_pos.y}) this turn",
+        )
         return True
 
     def _start_post_bridge_navigation(self, target_pos: Position) -> None:
@@ -304,13 +440,16 @@ class BridgeBuilder:
 
         tx, ty = self._post_bridge_target
         my_pos = ct.get_position()
+        self._log(ct, f"post-bridge nav at ({my_pos.x},{my_pos.y}) -> target ({tx},{ty})")
         if (my_pos.x, my_pos.y) == (tx, ty):
+            self._log(ct, "arrived at bridge target; triggering next bridge cycle step")
             self._post_bridge_target = None
             self._post_bridge_nav.reset()
             self._post_generator_bridge_pending = True
             return self._run_post_generator_bridge(ct, core_pos)
 
         if core_pos is None:
+            self._log(ct, "post-bridge nav paused: core_pos unknown")
             return True
 
         if self._post_bridge_nav.target != (tx, ty):
@@ -318,12 +457,15 @@ class BridgeBuilder:
 
         move_dir = self._post_bridge_nav.next_move(ct)
         if move_dir is None:
+            self._log(ct, "TangentBug returned no move this turn")
             return True
 
+        self._log(ct, f"TangentBug move direction={move_dir}")
         self._road_then_move(ct, move_dir)
 
         new_pos = ct.get_position()
         if (new_pos.x, new_pos.y) == (tx, ty):
+            self._log(ct, "arrived at bridge target after movement; triggering next bridge cycle step")
             self._post_bridge_target = None
             self._post_bridge_nav.reset()
             self._post_generator_bridge_pending = True
@@ -359,10 +501,17 @@ class BridgeBuilder:
             return (core_dist_sq, -start_dist_sq, pos.x, pos.y)
 
         candidates.sort(key=sort_key)
-        return candidates[0]
+        best = candidates[0]
+        self._log(
+            ct,
+            (
+                f"bridge target choice from ({start_pos.x},{start_pos.y}) -> ({best.x},{best.y}) "
+                f"out of {len(candidates)} candidates toward core ({core.x},{core.y})"
+            ),
+        )
+        return best
 
-    @staticmethod
-    def _clear_underfoot_for_bridge(ct: Controller, my_pos: Position) -> bool:
+    def _clear_underfoot_for_bridge(self, ct: Controller, my_pos: Position) -> bool:
         building_id = ct.get_tile_building_id(my_pos)
         if building_id is None:
             return False
@@ -378,6 +527,7 @@ class BridgeBuilder:
             EntityType.BARRIER,
         ) and ct.can_destroy(my_pos):
             ct.destroy(my_pos)
+            self._log(ct, f"cleared underfoot {b_type} at ({my_pos.x},{my_pos.y})")
             return True
 
         return False
@@ -387,6 +537,11 @@ class BridgeBuilder:
         self._post_bridge_target = None
         self._post_bridge_nav.reset()
 
+    def _finish_bridge_cycle_to_core(self, ct: Controller) -> None:
+        self._log(ct, "bridge target is on friendly core tile, exiting bridge cycle")
+        self._clear_post_bridge_state()
+        self._resume_bfs_after_bridge = True
+
     @staticmethod
     def _is_on_friendly_core(ct: Controller, pos: Position) -> bool:
         building_id = ct.get_tile_building_id(pos)
@@ -395,6 +550,17 @@ class BridgeBuilder:
         return (
             ct.get_entity_type(building_id) == EntityType.CORE
             and ct.get_team(building_id) == ct.get_team()
+        )
+
+    def _log(self, ct: Controller, message: str) -> None:
+        if not self.debug_prints:
+            return
+        if ct.get_current_round() >= 100:
+            return
+        pos = ct.get_position()
+        print(
+            f"[BridgeBuilder][R{ct.get_current_round()}][{pos.x},{pos.y}] {message}",
+            file=sys.stderr,
         )
 
     @staticmethod
