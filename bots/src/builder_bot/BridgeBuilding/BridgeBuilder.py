@@ -362,6 +362,15 @@ class BridgeBuilder:
                 return True
         return False
 
+    @staticmethod
+    def _has_marker_at(ct: Controller, pos: Position) -> bool:
+        for entity_id in ct.get_nearby_entities():
+            if ct.get_entity_type(entity_id) != EntityType.MARKER:
+                continue
+            if ct.get_position(entity_id) == pos:
+                return True
+        return False
+
     def _run_post_generator_bridge(
         self,
         ct: Controller,
@@ -501,15 +510,47 @@ class BridgeBuilder:
             return (core_dist_sq, -start_dist_sq, pos.x, pos.y)
 
         candidates.sort(key=sort_key)
-        best = candidates[0]
-        self._log(
-            ct,
-            (
-                f"bridge target choice from ({start_pos.x},{start_pos.y}) -> ({best.x},{best.y}) "
-                f"out of {len(candidates)} candidates toward core ({core.x},{core.y})"
-            ),
-        )
-        return best
+        for cand in candidates:
+            if self._is_valid_bridge_target_tile(ct, cand):
+                self._log(
+                    ct,
+                    (
+                        f"bridge target choice from ({start_pos.x},{start_pos.y}) -> ({cand.x},{cand.y}) "
+                        f"out of {len(candidates)} candidates toward core ({core.x},{core.y})"
+                    ),
+                )
+                return cand
+            self._log(
+                ct,
+                f"bridge target rejected ({cand.x},{cand.y}) due to tile type/state",
+            )
+
+        self._log(ct, "no valid bridge target candidate after tile-state filtering")
+        return None
+
+    def _is_valid_bridge_target_tile(self, ct: Controller, pos: Position) -> bool:
+        # Preserve terminal behavior: when target lands on core tile we end bridge cycle.
+        if self._is_on_friendly_core(ct, pos):
+            return True
+
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is not None:
+            b_type = ct.get_entity_type(building_id)
+            return b_type in (
+                EntityType.ROAD,
+                EntityType.BRIDGE,
+                EntityType.CONVEYOR,
+                EntityType.ARMOURED_CONVEYOR,
+            )
+
+        if self._has_marker_at(ct, pos):
+            return True
+
+        try:
+            env = ct.get_tile_env(pos)
+        except Exception:
+            return False
+        return env == Environment.EMPTY
 
     def _clear_underfoot_for_bridge(self, ct: Controller, my_pos: Position) -> bool:
         building_id = ct.get_tile_building_id(my_pos)
