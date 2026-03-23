@@ -97,7 +97,9 @@ class BuilderBot:
                 guarded_acted = True
             if not guarded_acted and self.guarded_conveyer.no_ore_in_scan:
                 if self.known_symmetry is not None:
-                    guarded_acted = self.bridge_builder.main(ct, self.known_symmetry)
+                    guarded_acted = self.bridge_builder.main(
+                        ct, self.known_symmetry, core_pos=self.core_pos
+                    )
                     if not guarded_acted:
                         guarded_acted = self.gaurded_convery_move.run(ct)
                 else:
@@ -120,7 +122,9 @@ class BuilderBot:
                     break
 
             if ore_in_vision:
-                bridge_builder_acted = self.bridge_builder.main(ct, self.known_symmetry)
+                bridge_builder_acted = self.bridge_builder.main(
+                    ct, self.known_symmetry, core_pos=self.core_pos
+                )
             else:
                 bridge_builder_acted = self.bfs_builder.run(
                     ct=ct,
