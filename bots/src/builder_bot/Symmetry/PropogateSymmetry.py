@@ -3,7 +3,7 @@ import sys
 
 from cambc import EntityType, Position
 
-DEBUG_PRINTS = True
+DEBUG_PRINTS = False
 
 _MarkerInfo = namedtuple('_MarkerInfo', ['value', 'position'])
 
