@@ -1,4 +1,4 @@
-from cambc import Controller, Environment
+from cambc import Controller
 from .Symmetry.TerrainMemory import SymmetryAnalyzer
 from .Symmetry.PropogateSymmetry import SignalPropagator
 from .Movement.TangentBug import TangentBug
@@ -96,13 +96,16 @@ class BuilderBot:
             ):
                 guarded_acted = True
             if not guarded_acted and self.guarded_conveyer.no_ore_in_scan:
-                if self.known_symmetry is not None:
-                    guarded_acted = self.bridge_builder.main(
-                        ct, self.known_symmetry, core_pos=self.core_pos
-                    )
-                    if not guarded_acted:
-                        guarded_acted = self.gaurded_convery_move.run(ct)
-                else:
+                guarded_acted = self.bridge_builder.main(
+                    ct=ct,
+                    known_symmetry=self.known_symmetry,
+                    core_pos=self.core_pos,
+                    symmetry_analyzer=self.symmetry_analyzer,
+                    bfs_builder=self.bfs_builder,
+                    nav=self.nav,
+                    set_nav_target=self._set_nav_target,
+                )
+                if not guarded_acted:
                     guarded_acted = self.gaurded_convery_move.run(ct)
 
         '''
@@ -111,27 +114,15 @@ class BuilderBot:
         '''
         bridge_builder_acted = False
         if not guarded_acted and self.agentmode == "BRIDGE_BUILDER":
-            ore_in_vision = False
-            for tile in nearby_tiles:
-                try:
-                    env = ct.get_tile_env(tile)
-                except Exception:
-                    continue
-                if env in (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
-                    ore_in_vision = True
-                    break
-
-            if ore_in_vision:
-                bridge_builder_acted = self.bridge_builder.main(
-                    ct, self.known_symmetry, core_pos=self.core_pos
-                )
-            else:
-                bridge_builder_acted = self.bfs_builder.run(
-                    ct=ct,
-                    core_pos=self.core_pos,
-                    nav=self.nav,
-                    set_nav_target=self._set_nav_target,
-                )
+            bridge_builder_acted = self.bridge_builder.main(
+                ct=ct,
+                known_symmetry=self.known_symmetry,
+                core_pos=self.core_pos,
+                symmetry_analyzer=self.symmetry_analyzer,
+                bfs_builder=self.bfs_builder,
+                nav=self.nav,
+                set_nav_target=self._set_nav_target,
+            )
             if not bridge_builder_acted:
                 bridge_builder_acted = self.gaurded_convery_move.run(ct)
 
