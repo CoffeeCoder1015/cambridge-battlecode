@@ -134,18 +134,6 @@ class BuilderBot:
         # get nearby environment and insert obstacles and ores into LUT
         self.update_symmetry(ct, nearby_tiles, nearby_units)
         
-        # draw possible enemy core positions
-        if self.debug:
-            w, h = self.dimensions
-            cx, cy = self.ally_core_pos.x, self.ally_core_pos.y
-            for sym in self.possible_symmetries:
-                if sym == "horizontal":
-                    ct.draw_indicator_line(current_pos, Position(w - 1 - cx, cy), 255, 165, 0)
-                elif sym == "vertical":
-                    ct.draw_indicator_line(current_pos, Position(cx, h - 1 - cy), 255, 165, 0)
-                elif sym == "rotational":
-                    ct.draw_indicator_line(current_pos, Position(w - 1 - cx, h - 1 - cy), 255, 165, 0)
-        
         nearby_buildings = ct.get_nearby_buildings()
         development_percentage = len(nearby_buildings) / max(1, len(nearby_tiles))
         
@@ -169,6 +157,19 @@ class BuilderBot:
                 self.potential_direction = move_direction
 
         ct.move(move_direction)
+        
+        # draw possible enemy core positions
+        if self.debug:
+            w, h = self.dimensions
+            cx, cy = self.ally_core_pos.x, self.ally_core_pos.y
+            for sym in self.possible_symmetries:
+                if sym == "horizontal":
+                    ct.draw_indicator_line(current_pos.add(move_direction), Position(w - 1 - cx, cy), 255, 165, 0)
+                elif sym == "vertical":
+                    ct.draw_indicator_line(current_pos.add(move_direction), Position(cx, h - 1 - cy), 255, 165, 0)
+                elif sym == "rotational":
+                    ct.draw_indicator_line(current_pos.add(move_direction), Position(w - 1 - cx, h - 1 - cy), 255, 165, 0)
+        
 
     def do_a_bounce(self, ct, current_pos, move_direction):
         # bounce by picking direction that is to the sides or oppisite diagonals diagonals to current direction
