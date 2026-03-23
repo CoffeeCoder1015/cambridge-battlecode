@@ -5,7 +5,6 @@ from .Movement.TangentBug import TangentBug
 from .GuardedConveyer.GuardedConveyer import GuardedConveyer
 from .GuardedConveyer.GaurdedConveryMove import GaurdedConveryMove
 from .Movement.Hound import Hound
-from .BridgeBuilding.BfsBuilder import BfsBuilder
 from .BridgeBuilding.BridgeBuilder import BridgeBuilder
 from .helpers import execute_nav_step, refresh_core_pos, set_nav_target
 
@@ -21,7 +20,6 @@ class BuilderBot:
         self.guarded_conveyer = GuardedConveyer()
         self.gaurded_convery_move = GaurdedConveryMove()
         self.hound = Hound(debug_prints=DEBUG_PRINTS)
-        self.bfs_builder = BfsBuilder()
         self.bridge_builder = BridgeBuilder()
         self._target_set = False
         self.core_pos: tuple[int, int] | None = None
@@ -101,9 +99,6 @@ class BuilderBot:
                     known_symmetry=self.known_symmetry,
                     core_pos=self.core_pos,
                     symmetry_analyzer=self.symmetry_analyzer,
-                    bfs_builder=self.bfs_builder,
-                    nav=self.nav,
-                    set_nav_target=self._set_nav_target,
                 )
                 if not guarded_acted:
                     guarded_acted = self.gaurded_convery_move.run(ct)
@@ -119,9 +114,6 @@ class BuilderBot:
                 known_symmetry=self.known_symmetry,
                 core_pos=self.core_pos,
                 symmetry_analyzer=self.symmetry_analyzer,
-                bfs_builder=self.bfs_builder,
-                nav=self.nav,
-                set_nav_target=self._set_nav_target,
             )
             if not bridge_builder_acted:
                 bridge_builder_acted = self.gaurded_convery_move.run(ct)

@@ -3,6 +3,7 @@ import sys
 from cambc import Controller, Direction, EntityType
 
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
+CORE_DEBUG_PRINTS = False
 
 MAGIC_MASK = 0x5A000000
 INFO_MASK  = 0x00000007
@@ -45,9 +46,10 @@ class Core:
             sym = _MASK_TO_SYM.get(combined_mask)
             if sym is not None:
                 self.solved_sym = sym
-                print(
-                    f"TURN {ct.get_current_round()}: [Core {ct.get_position()}] "
-                    f"CORE HAS RESOLVED SYMMETRY -> {_SYM_NAMES[sym]}",
-                    file=sys.stderr,
-                )
+                if CORE_DEBUG_PRINTS:
+                    print(
+                        f"TURN {ct.get_current_round()}: [Core {ct.get_position()}] "
+                        f"CORE HAS RESOLVED SYMMETRY -> {_SYM_NAMES[sym]}",
+                        file=sys.stderr,
+                    )
 

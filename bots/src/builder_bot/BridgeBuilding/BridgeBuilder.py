@@ -1,5 +1,6 @@
+import random
 import sys
-from typing import Any, Callable
+from typing import Any
 
 from cambc import Controller, Direction, EntityType, Environment, Position
 from ..Movement.TangentBug import TangentBug
@@ -7,7 +8,7 @@ from ..Movement.TangentBug import TangentBug
 ORE_ENVS = (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE)
 ACTION_RADIUS_SQ = 2
 MAX_GREEDY_MOVES = 7  # strictly less than 8
-BRIDGE_BUILDER_DEBUG_PRINTS = True
+BRIDGE_BUILDER_DEBUG_PRINTS = False
 
 
 class BridgeBuilder:
@@ -16,7 +17,7 @@ class BridgeBuilder:
         self.ore_target: tuple[int, int] | None = None
         self._post_generator_bridge_pending = False
         self._post_bridge_target: tuple[int, int] | None = None
-        self._resume_bfs_after_bridge = False
+        self._resume_random_after_bridge = False
         self._post_bridge_nav = TangentBug()
 
     def main(
@@ -25,9 +26,6 @@ class BridgeBuilder:
         known_symmetry=None,
         core_pos: tuple[int, int] | None = None,
         symmetry_analyzer: Any | None = None,
-        bfs_builder=None,
-        nav=None,
-        set_nav_target: Callable[[int, int], None] | None = None,
     ) -> bool:
         del known_symmetry
         my_pos = ct.get_position()
@@ -37,7 +35,7 @@ class BridgeBuilder:
                 f"main pos=({my_pos.x},{my_pos.y}) ore_target={self.ore_target} "
                 f"post_bridge_target={self._post_bridge_target} "
                 f"post_bridge_pending={self._post_generator_bridge_pending} "
-                f"resume_bfs={self._resume_bfs_after_bridge}"
+                f"resume_random={self._resume_random_after_bridge}"
             ),
         )
 
@@ -49,17 +47,11 @@ class BridgeBuilder:
             self._log(ct, "running post-generator bridge cycle")
             return self._run_post_generator_bridge(ct, core_pos)
 
-        if self._resume_bfs_after_bridge:
-            self._resume_bfs_after_bridge = False
+        if self._resume_random_after_bridge:
+            self._resume_random_after_bridge = False
             self.ore_target = None
-            self._log(ct, "bridge cycle complete at core, re-entering BFS exploration")
-            return self._run_bfs_fallback(
-                ct=ct,
-                core_pos=core_pos,
-                bfs_builder=bfs_builder,
-                nav=nav,
-                set_nav_target=set_nav_target,
-            )
+            self._log(ct, "bridge cycle complete at core, re-entering random exploration")
+            return self._run_random_fallback(ct)
 
         visible_ores = self._visible_ores_from_scan(ct, symmetry_analyzer)
         self._log(ct, f"visible ores in scan={len(visible_ores)} {sorted(visible_ores)}")
@@ -80,14 +72,8 @@ class BridgeBuilder:
             self._log(ct, f"selected reachable ore target={self.ore_target}")
 
         if self.ore_target is None:
-            self._log(ct, "no reachable ore, falling back to BFS exploration")
-            return self._run_bfs_fallback(
-                ct=ct,
-                core_pos=core_pos,
-                bfs_builder=bfs_builder,
-                nav=nav,
-                set_nav_target=set_nav_target,
-            )
+            self._log(ct, "no reachable ore, falling back to random exploration")
+            return self._run_random_fallback(ct)
 
         ore_pos = Position(self.ore_target[0], self.ore_target[1])
 
@@ -105,15 +91,9 @@ class BridgeBuilder:
 
         path = self._greedy_path_to_ore(ct, my_pos, ore_pos, MAX_GREEDY_MOVES)
         if path is None:
-            self._log(ct, f"could not greedy path to ore {self.ore_target}, returning to BFS")
+            self._log(ct, f"could not greedy path to ore {self.ore_target}, returning to random")
             self.ore_target = None
-            return self._run_bfs_fallback(
-                ct=ct,
-                core_pos=core_pos,
-                bfs_builder=bfs_builder,
-                nav=nav,
-                set_nav_target=set_nav_target,
-            )
+            return self._run_random_fallback(ct)
 
         if not path:
             self._log(ct, "already effectively in range (empty path), holding control")
@@ -581,7 +561,7 @@ class BridgeBuilder:
     def _finish_bridge_cycle_to_core(self, ct: Controller) -> None:
         self._log(ct, "bridge target is on friendly core tile, exiting bridge cycle")
         self._clear_post_bridge_state()
-        self._resume_bfs_after_bridge = True
+        self._resume_random_after_bridge = True
 
     @staticmethod
     def _is_on_friendly_core(ct: Controller, pos: Position) -> bool:
@@ -626,18 +606,16 @@ class BridgeBuilder:
         return acted
 
     @staticmethod
-    def _run_bfs_fallback(
-        ct: Controller,
-        core_pos: tuple[int, int] | None,
-        bfs_builder,
-        nav,
-        set_nav_target: Callable[[int, int], None] | None,
-    ) -> bool:
-        if bfs_builder is None or nav is None or set_nav_target is None:
-            return False
-        return bfs_builder.run(
-            ct=ct,
-            core_pos=core_pos,
-            nav=nav,
-            set_nav_target=set_nav_target,
-        )
+    def _run_random_fallback(ct: Controller) -> bool:
+        directions = [
+            Direction.NORTH,
+            Direction.EAST,
+            Direction.SOUTH,
+            Direction.WEST,
+        ]
+        random.shuffle(directions)
+        for move_dir in directions:
+            if ct.can_move(move_dir):
+                ct.move(move_dir)
+                return True
+        return False
