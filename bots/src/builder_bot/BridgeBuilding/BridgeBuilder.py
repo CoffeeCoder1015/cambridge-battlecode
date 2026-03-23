@@ -10,6 +10,7 @@ MAX_GREEDY_MOVES = 7  # strictly less than 8
 class BridgeBuilder:
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
+        self._post_generator_bridge_pending = False
 
     def main(
         self,
@@ -22,6 +23,9 @@ class BridgeBuilder:
         set_nav_target: Callable[[int, int], None] | None = None,
     ) -> bool:
         del known_symmetry
+
+        if self._post_generator_bridge_pending:
+            return self._run_post_generator_bridge(ct, core_pos)
 
         my_pos = ct.get_position()
         visible_ores = self._visible_ores_from_scan(ct, symmetry_analyzer)
@@ -48,6 +52,7 @@ class BridgeBuilder:
             built = self._build_generator_on_ore(ct, ore_pos)
             if built:
                 self.ore_target = None
+                self._post_generator_bridge_pending = True
             # Keep control while in range so fallback movement does not pull us off target.
             return True
 
@@ -228,6 +233,93 @@ class BridgeBuilder:
         # Backward-compatible fallback where ore extraction uses harvester API.
         if ct.can_build_harvester(ore_pos):
             ct.build_harvester(ore_pos)
+            return True
+
+        return False
+
+    def _run_post_generator_bridge(
+        self,
+        ct: Controller,
+        core_pos: tuple[int, int] | None,
+    ) -> bool:
+        if core_pos is None:
+            return True
+
+        if ct.get_action_cooldown() != 0:
+            return True
+
+        start_pos = ct.get_position()
+        target_pos = self._select_bridge_target_toward_core(
+            ct=ct,
+            start_pos=start_pos,
+            core_pos=core_pos,
+        )
+        if target_pos is None:
+            self._post_generator_bridge_pending = False
+            return True
+
+        if ct.can_build_bridge(start_pos, target_pos):
+            ct.build_bridge(start_pos, target_pos)
+            self._post_generator_bridge_pending = False
+            return True
+
+        # Some tiles (for example roads) can block bridge placement on the start tile.
+        if self._clear_underfoot_for_bridge(ct, start_pos):
+            if ct.can_build_bridge(start_pos, target_pos):
+                ct.build_bridge(start_pos, target_pos)
+                self._post_generator_bridge_pending = False
+                return True
+
+        return True
+
+    def _select_bridge_target_toward_core(
+        self,
+        ct: Controller,
+        start_pos: Position,
+        core_pos: tuple[int, int],
+    ) -> Position | None:
+        core = Position(core_pos[0], core_pos[1])
+        candidates: list[Position] = []
+
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                dist_from_start_sq = dx * dx + dy * dy
+                if dist_from_start_sq == 0 or dist_from_start_sq > 9:
+                    continue
+                x = start_pos.x + dx
+                y = start_pos.y + dy
+                if not (0 <= x < ct.get_map_width() and 0 <= y < ct.get_map_height()):
+                    continue
+                candidates.append(Position(x, y))
+
+        if not candidates:
+            return None
+
+        def sort_key(pos: Position) -> tuple[int, int, int, int]:
+            core_dist_sq = (pos.x - core.x) ** 2 + (pos.y - core.y) ** 2
+            start_dist_sq = (pos.x - start_pos.x) ** 2 + (pos.y - start_pos.y) ** 2
+            return (core_dist_sq, -start_dist_sq, pos.x, pos.y)
+
+        candidates.sort(key=sort_key)
+        return candidates[0]
+
+    @staticmethod
+    def _clear_underfoot_for_bridge(ct: Controller, my_pos: Position) -> bool:
+        building_id = ct.get_tile_building_id(my_pos)
+        if building_id is None:
+            return False
+
+        b_type = ct.get_entity_type(building_id)
+        if b_type == EntityType.CORE:
+            return False
+
+        if b_type in (
+            EntityType.ROAD,
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+            EntityType.BARRIER,
+        ) and ct.can_destroy(my_pos):
+            ct.destroy(my_pos)
             return True
 
         return False
