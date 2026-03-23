@@ -528,7 +528,7 @@ class GuardedConveyer:
     def _fortify_ore_ring(self, ct: Controller, ore_pos: Position) -> tuple[bool, bool]:
         """
         Build barriers on all 8 neighboring tiles around ore.
-        Only target ROAD, MARKER, and EMPTY tiles.
+        Only target ROAD, MARKER, EMPTY, and ORE tiles.
         Natural walls or other structures are treated as already acceptable.
         """
         unresolved = False
@@ -566,7 +566,11 @@ class GuardedConveyer:
                 continue
 
             env = ct.get_tile_env(target)
-            if env == Environment.EMPTY:
+            if env in (
+                Environment.EMPTY,
+                Environment.ORE_TITANIUM,
+                Environment.ORE_AXIONITE,
+            ):
                 unresolved = True
                 if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
                     ct.build_barrier(target)
@@ -657,7 +661,7 @@ class GuardedConveyer:
         """
         Fill neighbors around current conveyor tile with barriers while returning to core.
         Preserve conveyors and the ore/generator tile.
-        Only target ROAD, MARKER, and EMPTY tiles.
+        Only target ROAD, MARKER, EMPTY, and ORE tiles.
         Natural walls or other structures are treated as already acceptable.
         """
         unresolved = False
@@ -695,7 +699,11 @@ class GuardedConveyer:
                 continue
 
             env = ct.get_tile_env(target)
-            if env == Environment.EMPTY:
+            if env in (
+                Environment.EMPTY,
+                Environment.ORE_TITANIUM,
+                Environment.ORE_AXIONITE,
+            ):
                 unresolved = True
                 if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
                     ct.build_barrier(target)
