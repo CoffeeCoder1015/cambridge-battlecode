@@ -1,16 +1,14 @@
-from cambc import Controller, Direction, EntityType, Environment
+from cambc import Controller
 from .Symmetry.TerrainMemory import SymmetryAnalyzer
 from .Symmetry.PropogateSymmetry import SignalPropagator
 from .Movement.TangentBug import TangentBug
 from .GuardedConveyer.GuardedConveyer import GuardedConveyer
 from .GuardedConveyer.GaurdedConveryMove import GaurdedConveryMove
 from .Movement.Hound import Hound
+from .BridgeBuilding.BfsBuilder import BfsBuilder
+from .BridgeBuilding.BridgeBuilder import BridgeBuilder
+from .helpers import execute_nav_step, refresh_core_pos, set_nav_target
 
-import sys
-import random
-
-
-DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 DEBUG_PRINTS = False
 
 
@@ -23,16 +21,23 @@ class BuilderBot:
         self.guarded_conveyer = GuardedConveyer()
         self.gaurded_convery_move = GaurdedConveryMove()
         self.hound = Hound(debug_prints=DEBUG_PRINTS)
+        self.bfs_builder = BfsBuilder()
+        self.bridge_builder = BridgeBuilder()
         self._target_set = False
-        self.agentmode = None
         self.core_pos: tuple[int, int] | None = None
         self.enemy_core_target: tuple[int, int] | None = None
         self._last_nav_target: tuple[int, int] | None = None
 
+        self.agentmode = None 
+        # None = mode selection, "GUARDED_CONVEYER" = guarded conveyor mode, "BRIDGE_BUILDER" = bridge builder mode, "HOUND" = hound mode
+
+        self.agentrole = "Default" 
+        # "Default" = default role, "Builder" = builder role, 
+
     def run(self, ct: Controller) -> None:
 
-        self._refresh_core_pos(ct)
-
+        self.core_pos = refresh_core_pos(ct, self.core_pos)
+        
         if self.symmetry_analyzer is None:
             self.symmetry_analyzer = SymmetryAnalyzer(ct, core_pos=self.core_pos)
         elif self.core_pos is not None:
@@ -45,11 +50,18 @@ class BuilderBot:
         Presets for modes:
         """
         if ct.get_current_round() == 1:
-            self.agentmode = "GUARDED_CONVEYER"
+            self.agentmode = "BRIDGE_BUILDER"
+            self.agentrole = "Builder"
+
+        if ct.get_current_round() == 2:
+            self.agentmode = "BRIDGE_BUILDER"
+            self.agentrole = "Builder"
+
 
         nearby_tiles = ct.get_nearby_tiles()
         '''
         SYMMETRY ANALYSIS & PROPAGATION 
+        - runs every turn regardless of agentmode
         '''
 
         # Try to find symmetry based on surroundings
@@ -70,53 +82,53 @@ class BuilderBot:
 
         '''
         GUARDED CONVEYER MODE
+        - activated by the presets when bot is built
         '''
         guarded_acted = False
         if self.agentmode == "GUARDED_CONVEYER":
-            guarded_acted, guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
+            guarded_acted, _guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
+            if self.guarded_conveyer.complete:
+                # Hand control back to mode selection once guarded conveyor is done.
+                self.agentmode = "BRIDGE_BUILDER"
             if (
                 not guarded_acted
                 and self.guarded_conveyer.should_suppress_main_movement(ct)
             ):
                 guarded_acted = True
-                if DEBUG_PRINTS and ct.get_current_round() < 100:
-                    print(
-                        (
-                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                            "suppressing fallback movement during ore finalize sequence"
-                        ),
-                        file=sys.stderr,
-                    )
             if not guarded_acted and self.guarded_conveyer.no_ore_in_scan:
-                guarded_acted = self.gaurded_convery_move.run(ct)
-                if DEBUG_PRINTS and ct.get_current_round() < 100:
-                    print(
-                        (
-                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                            f"no ore in scan -> random cardinal move acted={guarded_acted}"
-                        ),
-                        file=sys.stderr,
-                    )
-            if DEBUG_PRINTS and ct.get_current_round() < 100:
-                print(
-                    (
-                        f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                        f"guarded_mode acted={guarded_acted} failed={guarded_failed}"
-                    ),
-                    file=sys.stderr,
+                guarded_acted = self.bridge_builder.main(
+                    ct=ct,
+                    known_symmetry=self.known_symmetry,
+                    core_pos=self.core_pos,
+                    symmetry_analyzer=self.symmetry_analyzer,
+                    bfs_builder=self.bfs_builder,
+                    nav=self.nav,
+                    set_nav_target=self._set_nav_target,
                 )
-            if guarded_failed:
-                if DEBUG_PRINTS and ct.get_current_round() < 100:
-                    print(
-                        (
-                            f"[BuilderBot id={ct.get_id()} r={ct.get_current_round()}] "
-                            "guarded mode reported hard failure; will keep retrying"
-                        ),
-                        file=sys.stderr,
-                    )
+                if not guarded_acted:
+                    guarded_acted = self.gaurded_convery_move.run(ct)
+
+        '''
+        BRIDGE BUILDER MODE
+        
+        '''
+        bridge_builder_acted = False
+        if not guarded_acted and self.agentmode == "BRIDGE_BUILDER":
+            bridge_builder_acted = self.bridge_builder.main(
+                ct=ct,
+                known_symmetry=self.known_symmetry,
+                core_pos=self.core_pos,
+                symmetry_analyzer=self.symmetry_analyzer,
+                bfs_builder=self.bfs_builder,
+                nav=self.nav,
+                set_nav_target=self._set_nav_target,
+            )
+            if not bridge_builder_acted:
+                bridge_builder_acted = self.gaurded_convery_move.run(ct)
 
         '''
         HOUND MODE
+        - enters hound mode if agentmode = None and we know symmetry of the map
         '''
         hound_acted = False
         if not guarded_acted and self.agentmode == "HOUND":
@@ -130,7 +142,7 @@ class BuilderBot:
             )
 
         '''
-        MOVEMENT LOGIC
+        MOVEMENT LOGIC (when agent.mode = None)
         '''
         if not guarded_acted and self.agentmode != "HOUND" and not hound_acted:
             if not self._target_set:
@@ -138,47 +150,14 @@ class BuilderBot:
                 self._set_nav_target(ct.get_map_width() // 2, ct.get_map_height() // 2)
             self._execute_nav_step(ct)
 
-    def _refresh_core_pos(self, ct: Controller) -> None:
-        for b_id in ct.get_nearby_buildings():
-            try:
-                if (
-                    ct.get_entity_type(b_id) == EntityType.CORE
-                    and ct.get_team(b_id) == ct.get_team()
-                ):
-                    pos = ct.get_position(b_id)
-                    self.core_pos = (pos.x, pos.y)
-                    return
-            except Exception:
-                continue
-
     def _set_nav_target(self, tx: int, ty: int) -> None:
-        next_target = (tx, ty)
-        if self._last_nav_target != next_target:
-            self.nav.set_target(tx, ty)
-            self._last_nav_target = next_target
-        self._target_set = True
+        self._last_nav_target, self._target_set = set_nav_target(
+            nav=self.nav,
+            last_nav_target=self._last_nav_target,
+            tx=tx,
+            ty=ty,
+        )
 
     def _execute_nav_step(self, ct: Controller) -> bool:
-        move_dir = self.nav.next_move(ct)
-        if move_dir is None:
-            return False
-
-        acted = False
-        move_pos = ct.get_position().add(move_dir)
-        if not ct.is_tile_passable(move_pos):
-            has_friendly_marker = any(
-                ct.get_entity_type(eid) == EntityType.MARKER
-                and ct.get_team(eid) == ct.get_team()
-                and ct.get_position(eid) == move_pos
-                for eid in ct.get_nearby_entities()
-            )
-            if ct.can_build_road(move_pos) and not has_friendly_marker:
-                ct.build_road(move_pos)
-                acted = True
-
-        if ct.can_move(move_dir):
-            ct.move(move_dir)
-            acted = True
-
-        return acted
+        return execute_nav_step(ct, self.nav)
 
