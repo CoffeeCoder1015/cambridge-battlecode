@@ -1,6 +1,7 @@
 from typing import Any, Callable
 
 from cambc import Controller, Direction, EntityType, Environment, Position
+from ..Movement.TangentBug import TangentBug
 
 ORE_ENVS = (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE)
 ACTION_RADIUS_SQ = 4
@@ -11,6 +12,8 @@ class BridgeBuilder:
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
         self._post_generator_bridge_pending = False
+        self._post_bridge_target: tuple[int, int] | None = None
+        self._post_bridge_nav = TangentBug()
 
     def main(
         self,
@@ -23,6 +26,9 @@ class BridgeBuilder:
         set_nav_target: Callable[[int, int], None] | None = None,
     ) -> bool:
         del known_symmetry
+
+        if self._post_bridge_target is not None:
+            return self._advance_post_bridge_navigation(ct)
 
         if self._post_generator_bridge_pending:
             return self._run_post_generator_bridge(ct, core_pos)
@@ -261,6 +267,8 @@ class BridgeBuilder:
         if ct.can_build_bridge(start_pos, target_pos):
             ct.build_bridge(start_pos, target_pos)
             self._post_generator_bridge_pending = False
+            self._start_post_bridge_navigation(target_pos)
+            self._advance_post_bridge_navigation(ct)
             return True
 
         # Some tiles (for example roads) can block bridge placement on the start tile.
@@ -268,8 +276,40 @@ class BridgeBuilder:
             if ct.can_build_bridge(start_pos, target_pos):
                 ct.build_bridge(start_pos, target_pos)
                 self._post_generator_bridge_pending = False
+                self._start_post_bridge_navigation(target_pos)
+                self._advance_post_bridge_navigation(ct)
                 return True
 
+        return True
+
+    def _start_post_bridge_navigation(self, target_pos: Position) -> None:
+        self._post_bridge_target = (target_pos.x, target_pos.y)
+        self._post_bridge_nav.set_target(target_pos.x, target_pos.y)
+
+    def _advance_post_bridge_navigation(self, ct: Controller) -> bool:
+        if self._post_bridge_target is None:
+            return True
+
+        tx, ty = self._post_bridge_target
+        my_pos = ct.get_position()
+        if (my_pos.x, my_pos.y) == (tx, ty):
+            self._post_bridge_target = None
+            self._post_bridge_nav.reset()
+            return True
+
+        if self._post_bridge_nav.target != (tx, ty):
+            self._post_bridge_nav.set_target(tx, ty)
+
+        move_dir = self._post_bridge_nav.next_move(ct)
+        if move_dir is None:
+            return True
+
+        self._road_then_move(ct, move_dir)
+
+        new_pos = ct.get_position()
+        if (new_pos.x, new_pos.y) == (tx, ty):
+            self._post_bridge_target = None
+            self._post_bridge_nav.reset()
         return True
 
     def _select_bridge_target_toward_core(
