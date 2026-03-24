@@ -80,50 +80,52 @@ class BuilderBot:
 
         '''
         GUARDED CONVEYER MODE
-        - activated by the presets when bot is built
         '''
-        guarded_acted = False
         if self.agentmode == "GUARDED_CONVEYER":
             guarded_acted, _guarded_failed = self.guarded_conveyer.run(ct, nearby_tiles)
             if self.guarded_conveyer.complete:
-                # Hand control back to mode selection once guarded conveyor is done.
                 self.agentmode = "BRIDGE_BUILDER"
-            if (
-                not guarded_acted
-                and self.guarded_conveyer.should_suppress_main_movement(ct)
-            ):
-                guarded_acted = True
-            if not guarded_acted and self.guarded_conveyer.no_ore_in_scan:
-                guarded_acted = self.bridge_builder.main(
+            
+            if guarded_acted or self.guarded_conveyer.should_suppress_main_movement(ct):
+                return # Yield turn. Do not fall through to other modes or movement.
+
+            if self.guarded_conveyer.no_ore_in_scan:
+                bridge_acted = self.bridge_builder.main(
                     ct=ct,
                     known_symmetry=self.known_symmetry,
                     core_pos=self.core_pos,
                     symmetry_analyzer=self.symmetry_analyzer,
                 )
-                if not guarded_acted:
-                    guarded_acted = self.gaurded_convery_move.run(ct)
+                if bridge_acted:
+                    return
+                
+                # If bridge didn't act, try conveyer move
+                self.gaurded_convery_move.run(ct)
+                return # Yield turn.
 
         '''
         BRIDGE BUILDER MODE
-        
         '''
-        bridge_builder_acted = False
-        if not guarded_acted and self.agentmode == "BRIDGE_BUILDER":
+        if self.agentmode == "BRIDGE_BUILDER":
             bridge_builder_acted = self.bridge_builder.main(
                 ct=ct,
                 known_symmetry=self.known_symmetry,
                 core_pos=self.core_pos,
                 symmetry_analyzer=self.symmetry_analyzer,
             )
-            if not bridge_builder_acted:
-                bridge_builder_acted = self.gaurded_convery_move.run(ct)
+            # If the bridge builder handled the turn (including waiting), exit immediately.
+            if bridge_builder_acted:
+                return 
+            
+            # If it explicitly returned False, try the fallback conveyer move.
+            conveyer_moved = self.gaurded_convery_move.run(ct)
+            if conveyer_moved:
+                return
 
         '''
         HOUND MODE
-        - enters hound mode if agentmode = None and we know symmetry of the map
         '''
-        hound_acted = False
-        if not guarded_acted and self.agentmode == "HOUND":
+        if self.agentmode == "HOUND":
             hound_acted, self.enemy_core_target = self.hound.run(
                 ct=ct,
                 enemy_core_target=self.enemy_core_target,
@@ -132,15 +134,18 @@ class BuilderBot:
                 set_nav_target=self._set_nav_target,
                 execute_nav_step=self._execute_nav_step,
             )
+            if hound_acted:
+                return
 
         '''
-        MOVEMENT LOGIC (when agent.mode = None)
+        FALLBACK MOVEMENT LOGIC
+        - Only reached if NO mode handled the turn.
         '''
-        if not guarded_acted and self.agentmode != "HOUND" and not hound_acted:
-            if not self._target_set:
-                # Set a navigation target on first run (map centre as default exploration goal)
-                self._set_nav_target(ct.get_map_width() // 2, ct.get_map_height() // 2)
-            self._execute_nav_step(ct)
+        # We don't need all those boolean flags anymore because we would have returned early!
+        if not self._target_set:
+            self._set_nav_target(ct.get_map_width() // 2, ct.get_map_height() // 2)
+        
+        self._execute_nav_step(ct)
 
     def _set_nav_target(self, tx: int, ty: int) -> None:
         self._last_nav_target, self._target_set = set_nav_target(

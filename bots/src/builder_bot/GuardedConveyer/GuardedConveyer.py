@@ -1,6 +1,7 @@
 from collections import deque
 
 from cambc import Controller, Direction, EntityType, Environment, Position
+from ..helpers import get_cost_affordability
 
 
 CARDINAL_DIRECTIONS = (
@@ -104,6 +105,13 @@ class GuardedConveyer:
         best_path: list[Direction] | None = None
 
         for ore_pos in ore_tiles:
+            blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+            if blocking_type is not None:
+                self._log(
+                    ct,
+                    f"ore {ore_pos} rejected: blocked by non-road entity {blocking_type}",
+                )
+                continue
             candidate = self._path_to_adjacent_tile(
                 ct=ct,
                 nearby_tiles=nearby_tiles,
@@ -243,6 +251,17 @@ class GuardedConveyer:
             return False, False
 
         if self.ore_finalize_phase == "BUILD_GENERATOR":
+            blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+            if blocking_type is not None:
+                self._log(
+                    ct,
+                    (
+                        f"finalize: forfeiting ore {ore_pos}; "
+                        f"blocked by non-road entity {blocking_type}"
+                    ),
+                )
+                return False, True
+
             cleared, done = self._clear_road_on_ore(ct, ore_pos)
             if cleared:
                 return True, False
@@ -404,6 +423,16 @@ class GuardedConveyer:
             and ct.get_team(building_id) == ct.get_team()
         )
 
+    @staticmethod
+    def _ore_blocking_structure_type(ct: Controller, ore_pos: Position):
+        building_id = ct.get_tile_building_id(ore_pos)
+        if building_id is None:
+            return None
+        b_type = ct.get_entity_type(building_id)
+        if b_type == EntityType.ROAD:
+            return None
+        return b_type
+
     def _try_build_generator(self, ct: Controller) -> bool:
         if self.ore_target is None:
             self._log(ct, "build failed: ore_target is None")
@@ -418,6 +447,20 @@ class GuardedConveyer:
 
         if ct.get_action_cooldown() != 0:
             self._log(ct, f"build delayed: action_cd={ct.get_action_cooldown()}")
+            return cleared
+
+        affordable_harvester, harvester_cost, available_resources = get_cost_affordability(
+            ct,
+            "get_harvester_cost",
+        )
+        if not affordable_harvester:
+            self._log(
+                ct,
+                (
+                    f"waiting for resources to build harvester at {self.ore_target}; "
+                    f"need={harvester_cost}, have={available_resources}"
+                ),
+            )
             return cleared
 
         if ct.can_build_harvester(self.ore_target):
@@ -639,6 +682,20 @@ class GuardedConveyer:
                 self._log(ct, f"step-on-ore: destroyed marker at {ore_pos}")
                 return True, False
             self._log(ct, f"step-on-ore: marker at {ore_pos} not destroyable")
+            return False, False
+
+        affordable_road, road_cost, available_resources = get_cost_affordability(
+            ct,
+            "get_road_cost",
+        )
+        if not affordable_road:
+            self._log(
+                ct,
+                (
+                    f"step-on-ore: waiting for resources to build road at {ore_pos}; "
+                    f"need={road_cost}, have={available_resources}"
+                ),
+            )
             return False, False
 
         if ct.get_action_cooldown() == 0 and ct.can_build_road(ore_pos):
