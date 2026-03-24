@@ -5,7 +5,7 @@ from typing import Any
 from cambc import Controller, Direction, EntityType, Environment, Position
 from ..Movement.TangentBug import TangentBug
 
-ORE_ENVS = (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE)
+ORE_ENVS = (Environment.ORE_TITANIUM,)
 ACTION_RADIUS_SQ = 2
 MAX_GREEDY_MOVES = 7  # strictly less than 8
 BRIDGE_BUILDER_DEBUG_PRINTS = True

@@ -335,7 +335,7 @@ class GuardedConveyer:
                 env = ct.get_tile_env(tile)
             except Exception:
                 continue
-            if env in (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
+            if env == Environment.ORE_TITANIUM:
                 ores.append(tile)
         return ores
 
@@ -345,7 +345,7 @@ class GuardedConveyer:
         except Exception:
             return False
 
-        if env in (Environment.WALL, Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
+        if env in (Environment.WALL, Environment.ORE_TITANIUM):
             return False
 
         bot_id = ct.get_tile_builder_bot_id(pos)
@@ -564,7 +564,6 @@ class GuardedConveyer:
             if env in (
                 Environment.EMPTY,
                 Environment.ORE_TITANIUM,
-                Environment.ORE_AXIONITE,
             ):
                 unresolved = True
                 if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
@@ -697,7 +696,6 @@ class GuardedConveyer:
             if env in (
                 Environment.EMPTY,
                 Environment.ORE_TITANIUM,
-                Environment.ORE_AXIONITE,
             ):
                 unresolved = True
                 if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
