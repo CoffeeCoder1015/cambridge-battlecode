@@ -30,6 +30,8 @@ class BridgeBuilder:
         self._post_bridge_target: tuple[int, int] | None = None
         self._resume_random_after_bridge = False
         self._post_bridge_nav = TangentBug()
+        self._fallback_nav_target: tuple[int, int] | None = None
+        self._fallback_nav = TangentBug()
 
     def main(
         self,
@@ -829,17 +831,25 @@ class BridgeBuilder:
 
         return acted
 
-    @staticmethod
-    def _run_random_fallback(ct: Controller) -> bool:
-        directions = [
-            Direction.NORTH,
-            Direction.EAST,
-            Direction.SOUTH,
-            Direction.WEST,
-        ]
-        random.shuffle(directions)
-        for move_dir in directions:
-            if ct.can_move(move_dir):
-                ct.move(move_dir)
+    def _run_random_fallback(self, ct: Controller) -> bool:
+        # Exploration fallback now uses TangentBug instead of random stepping.
+        if self._fallback_nav_target is None:
+            tx = random.randrange(ct.get_map_width())
+            ty = random.randrange(ct.get_map_height())
+            self._fallback_nav_target = (tx, ty)
+            self._fallback_nav.set_target(tx, ty)
+
+        move_dir = self._fallback_nav.next_move(ct)
+        if move_dir is not None:
+            moved = self._road_then_move(ct, move_dir)
+            if moved:
                 return True
-        return False
+
+        tx = random.randrange(ct.get_map_width())
+        ty = random.randrange(ct.get_map_height())
+        self._fallback_nav_target = (tx, ty)
+        self._fallback_nav.set_target(tx, ty)
+        move_dir = self._fallback_nav.next_move(ct)
+        if move_dir is None:
+            return False
+        return self._road_then_move(ct, move_dir)
