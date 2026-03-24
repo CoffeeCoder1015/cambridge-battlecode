@@ -3,6 +3,7 @@ import sys
 from typing import Any
 
 from cambc import Controller, Direction, EntityType, Environment, Position
+from ..helpers import get_cost_affordability
 from ..Movement.TangentBug import TangentBug
 
 ORE_ENVS = (Environment.ORE_TITANIUM,)
@@ -290,6 +291,20 @@ class BridgeBuilder:
             self._log(ct, f"build blocked by action cooldown={ct.get_action_cooldown()}")
             return False
 
+        affordable_extractor, extractor_cost, available_resources = get_cost_affordability(
+            ct,
+            "get_harvester_cost",
+        )
+        if not affordable_extractor:
+            self._log(
+                ct,
+                (
+                    f"waiting for resources to build extractor at ({ore_pos.x},{ore_pos.y}); "
+                    f"need={extractor_cost}, have={available_resources}"
+                ),
+            )
+            return False
+
         can_build_generator = getattr(ct, "can_build_generator", None)
         build_generator = getattr(ct, "build_generator", None)
         if callable(can_build_generator) and callable(build_generator):
@@ -398,7 +413,6 @@ class BridgeBuilder:
 
         start_pos = ct.get_position()
         self._log(ct, f"bridge-cycle start from ({start_pos.x},{start_pos.y})")
-        self._clear_underfoot_for_bridge(ct, start_pos)
 
         target_pos = self._select_bridge_target_toward_core(
             ct=ct,
@@ -416,6 +430,22 @@ class BridgeBuilder:
         if ct.get_action_cooldown() != 0:
             self._log(ct, f"bridge build blocked by action cooldown={ct.get_action_cooldown()}")
             return True
+
+        affordable_bridge, bridge_cost, available_resources = get_cost_affordability(
+            ct,
+            "get_bridge_cost",
+        )
+        if not affordable_bridge:
+            self._log(
+                ct,
+                (
+                    f"waiting for resources to build bridge to ({target_pos.x},{target_pos.y}); "
+                    f"need={bridge_cost}, have={available_resources}"
+                ),
+            )
+            return True
+
+        self._clear_underfoot_for_bridge(ct, start_pos)
 
         if ct.can_build_bridge(start_pos, target_pos):
             ct.build_bridge(start_pos, target_pos)
@@ -821,9 +851,14 @@ class BridgeBuilder:
                 and ct.get_position(eid) == move_pos
                 for eid in ct.get_nearby_entities()
             )
-            if ct.can_build_road(move_pos) and not has_friendly_marker:
-                ct.build_road(move_pos)
-                acted = True
+            if not has_friendly_marker:
+                affordable_road, _, _ = get_cost_affordability(ct, "get_road_cost")
+                if not affordable_road:
+                    # Hold position while saving for the intended road build.
+                    return True
+                if ct.can_build_road(move_pos):
+                    ct.build_road(move_pos)
+                    acted = True
 
         if ct.can_move(move_dir):
             ct.move(move_dir)

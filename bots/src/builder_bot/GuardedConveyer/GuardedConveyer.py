@@ -1,6 +1,7 @@
 from collections import deque
 
 from cambc import Controller, Direction, EntityType, Environment, Position
+from ..helpers import get_cost_affordability
 
 
 CARDINAL_DIRECTIONS = (
@@ -448,6 +449,20 @@ class GuardedConveyer:
             self._log(ct, f"build delayed: action_cd={ct.get_action_cooldown()}")
             return cleared
 
+        affordable_harvester, harvester_cost, available_resources = get_cost_affordability(
+            ct,
+            "get_harvester_cost",
+        )
+        if not affordable_harvester:
+            self._log(
+                ct,
+                (
+                    f"waiting for resources to build harvester at {self.ore_target}; "
+                    f"need={harvester_cost}, have={available_resources}"
+                ),
+            )
+            return cleared
+
         if ct.can_build_harvester(self.ore_target):
             ct.build_harvester(self.ore_target)
             self.complete = True
@@ -667,6 +682,20 @@ class GuardedConveyer:
                 self._log(ct, f"step-on-ore: destroyed marker at {ore_pos}")
                 return True, False
             self._log(ct, f"step-on-ore: marker at {ore_pos} not destroyable")
+            return False, False
+
+        affordable_road, road_cost, available_resources = get_cost_affordability(
+            ct,
+            "get_road_cost",
+        )
+        if not affordable_road:
+            self._log(
+                ct,
+                (
+                    f"step-on-ore: waiting for resources to build road at {ore_pos}; "
+                    f"need={road_cost}, have={available_resources}"
+                ),
+            )
             return False, False
 
         if ct.get_action_cooldown() == 0 and ct.can_build_road(ore_pos):
