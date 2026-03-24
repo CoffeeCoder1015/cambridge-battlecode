@@ -53,8 +53,10 @@ class BridgeBuilder:
         )
 
         if self._post_build_align_ore_target is not None:
-            self._log(ct, "continuing post-build cardinal alignment")
-            return self._run_post_build_cardinal_alignment(ct)
+                self._log(ct, "continuing post-build cardinal alignment")
+                # If it returns True, it moved. If False, it's aligned, so keep going.
+                if self._run_post_build_cardinal_alignment(ct):
+                    return True
 
         if self._remembered_ore_nav_target is not None:
             self._log(ct, "continuing remembered ore navigation")
@@ -666,15 +668,17 @@ class BridgeBuilder:
             return self._run_random_fallback(ct)
 
         if self._in_action_radius(my_pos, ore_pos):
-            self._log(ct, f"remembered ore ({tx},{ty}) in action radius, trying build")
+            self._log(ct, f"ore {self.ore_target} in action radius, trying build")
             built = self._build_generator_on_ore(ct, ore_pos)
             if built:
-                self._remembered_ore_target = None
-                self._clear_remembered_ore_navigation()
                 self.ore_target = None
                 self._start_post_build_alignment(ct, ore_pos)
             else:
-                self._log(ct, "generator build on remembered ore not possible this turn")
+                self._log(ct, "generator build not possible this turn")
+                # THE FIX: If we failed to build and it's NOT just a cooldown issue, the tile is invalid.
+                if ct.get_action_cooldown() == 0:
+                    self._log(ct, f"Abandoning unbuildable ore target {self.ore_target}")
+                    self.ore_target = None 
             return True
 
         if self._remembered_ore_nav.target != (tx, ty):
@@ -701,41 +705,35 @@ class BridgeBuilder:
         self._run_post_build_cardinal_alignment(ct)
 
     def _run_post_build_cardinal_alignment(self, ct: Controller) -> bool:
-        if self._post_build_align_ore_target is None:
-            return True
+            if self._post_build_align_ore_target is None:
+                return False # Changed to False
 
-        ox, oy = self._post_build_align_ore_target
-        ore_pos = Position(ox, oy)
-        my_pos = ct.get_position()
-        if self._is_adjacent_cardinal(my_pos, ore_pos):
-            self._post_build_align_ore_target = None
-            self._post_generator_bridge_pending = True
-            self._log(
-                ct,
-                (
-                    f"post-build alignment complete at ({my_pos.x},{my_pos.y}); "
-                    "entering post-generator bridge cycle"
-                ),
-            )
-            return True
-
-        moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
-        if moved:
-            new_pos = ct.get_position()
-            if self._is_adjacent_cardinal(new_pos, ore_pos):
+            ox, oy = self._post_build_align_ore_target
+            ore_pos = Position(ox, oy)
+            my_pos = ct.get_position()
+            if self._is_adjacent_cardinal(my_pos, ore_pos):
                 self._post_build_align_ore_target = None
                 self._post_generator_bridge_pending = True
                 self._log(
                     ct,
                     (
-                        f"post-build alignment moved to ({new_pos.x},{new_pos.y}); "
+                        f"post-build alignment complete at ({my_pos.x},{my_pos.y}); "
                         "entering post-generator bridge cycle"
                     ),
                 )
-            return True
+                return False # THE FIX: Return False so main() falls through to the bridge cycle!
 
-        self._log(ct, f"post-build alignment waiting at ({my_pos.x},{my_pos.y}) for ore ({ox},{oy})")
-        return True
+            moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
+            if moved:
+                new_pos = ct.get_position()
+                if self._is_adjacent_cardinal(new_pos, ore_pos):
+                    self._post_build_align_ore_target = None
+                    self._post_generator_bridge_pending = True
+                    self._log(ct, "post-build alignment moved; entering post-generator bridge cycle")
+                return True
+
+            self._log(ct, f"post-build alignment waiting at ({my_pos.x},{my_pos.y}) for ore ({ox},{oy})")
+            return True
 
     def _move_to_cardinal_adjacent_tile(self, ct: Controller, ore_pos: Position) -> bool:
         my_pos = ct.get_position()
