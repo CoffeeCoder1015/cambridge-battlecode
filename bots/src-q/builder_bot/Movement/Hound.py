@@ -7,6 +7,18 @@ class Hound:
     def __init__(self, debug_prints: bool = False):
         self.debug_prints = debug_prints
 
+    PRIORITY_MAP = {
+        EntityType.BRIDGE: 70,
+        EntityType.CONVEYOR: 60,
+        EntityType.ROAD: 50,
+    }
+
+    COLOR_MAP = {
+        EntityType.BRIDGE: (255, 0, 0),
+        EntityType.CONVEYOR: (255, 160, 0),
+        EntityType.ROAD: (255, 255, 0),
+    }
+
     def compute_enemy_core_target(
         self,
         ct: Controller,
@@ -91,32 +103,37 @@ class Hound:
     ) -> bool:
         nearby_buildings = ct.get_nearby_buildings()
         nearby_enemy_buildings = [
-            b for b in nearby_buildings if ct.get_team(b) != ct.get_team()
+            b for b in nearby_buildings 
+            if ct.get_team(b) != ct.get_team() 
+            and ct.get_entity_type(b) not in (EntityType.CORE, EntityType.HARVESTER)
         ]
 
         if not nearby_enemy_buildings:
             return False
 
         current_position = ct.get_position()
-        # Create list of (distance_sq, building_id) and sort by distance
-        building_distances = [
-            (current_position.distance_squared(ct.get_position(b)), b)
-            for b in nearby_enemy_buildings
-        ]
-        building_distances.sort(key=lambda x: x[0])
+        
+        # Calculate (priority, -distance_sq, building_id) for each target.
+        # Negative distance ensures that closer buildings win ties in priority.
+        potential_targets = []
+        for b_id in nearby_enemy_buildings:
+            etype = ct.get_entity_type(b_id)
+            priority = self.PRIORITY_MAP.get(etype, 10)
+            dist_sq = current_position.distance_squared(ct.get_position(b_id))
+            potential_targets.append((priority, -dist_sq, b_id))
 
-        # Highlight and target ONLY the closest building
-        closest_building_id = building_distances[0][1]
-        b_pos = ct.get_position(closest_building_id)
+        # Sort by priority desc, then distance asc (which is -dist_sq desc)
+        potential_targets.sort(reverse=True)
+
+        # Target the best building
+        target_id = potential_targets[0][2]
+        b_pos = ct.get_position(target_id)
         my_pos = ct.get_position()
+        etype = ct.get_entity_type(target_id)
 
-        match ct.get_entity_type(closest_building_id):
-            case EntityType.BRIDGE:
-                ct.draw_indicator_dot(b_pos, 255, 0, 0)
-            case EntityType.CONVEYOR:
-                ct.draw_indicator_dot(b_pos, 255, 160, 0)
-            case EntityType.ROAD:
-                ct.draw_indicator_dot(b_pos, 255, 255, 0)
+        # Highlight target using the requested color map
+        dot_color = self.COLOR_MAP.get(etype, (255, 160, 0))  # Default: Orange
+        ct.draw_indicator_dot(b_pos, *dot_color)
 
         # Physically walk onto the tile if not already there
         if my_pos.x != b_pos.x or my_pos.y != b_pos.y:
