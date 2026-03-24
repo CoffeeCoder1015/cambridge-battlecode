@@ -769,18 +769,34 @@ class BridgeBuilder:
         my_pos = ct.get_position()
         for move_dir in CARDINAL_DIRECTIONS:
             nxt = my_pos.add(move_dir)
+            
+            # 1. Tile must be cardinal to the ore
             if not self._is_adjacent_cardinal(nxt, ore_pos):
                 continue
-            if ct.can_move(move_dir):
-                ct.move(move_dir)
+                
+            # 2. Make sure it's not a wall or blocked by a solid building
+            try:
+                if ct.get_tile_env(nxt) == Environment.WALL:
+                    continue
+                    
+                b_id = ct.get_tile_building_id(nxt)
+                if b_id is not None:
+                    b_type = ct.get_entity_type(b_id)
+                    # Builder bots can only stand on these specific entities
+                    if b_type not in (EntityType.ROAD, EntityType.CORE, EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
+                        continue
+            except Exception:
+                continue
+
+            # 3. Use your helper to build the road and move
+            acted = self._road_then_move(ct, move_dir)
+            if acted:
                 self._log(
                     ct,
-                    (
-                        f"post-build alignment moved {move_dir} "
-                        f"to cardinal-adjacent tile ({nxt.x},{nxt.y})"
-                    ),
+                    f"post-build alignment securing cardinal tile ({nxt.x},{nxt.y})"
                 )
                 return True
+                
         return False
 
     @staticmethod
@@ -842,8 +858,9 @@ class BridgeBuilder:
 
     @staticmethod
     def _road_then_move(ct: Controller, move_dir: Direction) -> bool:
-        acted = False
         move_pos = ct.get_position().add(move_dir)
+        
+        # 1. Pave if no road
         if not ct.is_tile_passable(move_pos):
             has_friendly_marker = any(
                 ct.get_entity_type(eid) == EntityType.MARKER
@@ -854,17 +871,17 @@ class BridgeBuilder:
             if not has_friendly_marker:
                 affordable_road, _, _ = get_cost_affordability(ct, "get_road_cost")
                 if not affordable_road:
-                    # Hold position while saving for the intended road build.
-                    return True
+                    return True # Yield turn to save money for the road
                 if ct.can_build_road(move_pos):
                     ct.build_road(move_pos)
-                    acted = True
+                    return True 
 
+        # 2. Strict movement
         if ct.can_move(move_dir):
             ct.move(move_dir)
-            acted = True
-
-        return acted
+            return True
+                        
+        return False
 
     def _run_random_fallback(self, ct: Controller) -> bool:
         # Exploration fallback now uses TangentBug instead of random stepping.
