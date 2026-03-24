@@ -409,6 +409,8 @@ class BridgeBuilder:
             return True
 
         self._log(ct, f"bridge-cycle target selected=({target_pos.x},{target_pos.y})")
+        target_is_existing_return_path = self._is_on_friendly_return_path(ct, target_pos)
+
         if ct.get_action_cooldown() != 0:
             self._log(ct, f"bridge build blocked by action cooldown={ct.get_action_cooldown()}")
             return True
@@ -418,6 +420,9 @@ class BridgeBuilder:
             self._log(ct, f"built bridge from ({start_pos.x},{start_pos.y}) to ({target_pos.x},{target_pos.y})")
             if self._is_on_friendly_core(ct, target_pos):
                 self._finish_bridge_cycle_to_core(ct)
+                return True
+            if target_is_existing_return_path:
+                self._finish_bridge_cycle_to_existing_return_path(ct, target_pos)
                 return True
             self._post_generator_bridge_pending = False
             self._start_post_bridge_navigation(target_pos)
@@ -436,6 +441,9 @@ class BridgeBuilder:
                 )
                 if self._is_on_friendly_core(ct, target_pos):
                     self._finish_bridge_cycle_to_core(ct)
+                    return True
+                if target_is_existing_return_path:
+                    self._finish_bridge_cycle_to_existing_return_path(ct, target_pos)
                     return True
                 self._post_generator_bridge_pending = False
                 self._start_post_bridge_navigation(target_pos)
@@ -751,6 +759,33 @@ class BridgeBuilder:
         self._log(ct, "bridge target is on friendly core tile, exiting bridge cycle")
         self._clear_post_bridge_state()
         self._resume_random_after_bridge = True
+
+    def _finish_bridge_cycle_to_existing_return_path(self, ct: Controller, target_pos: Position) -> None:
+        self._log(
+            ct,
+            (
+                f"bridge target ({target_pos.x},{target_pos.y}) already has "
+                "friendly return-path infrastructure, exiting bridge cycle"
+            ),
+        )
+        self._clear_post_bridge_state()
+        self._resume_random_after_bridge = True
+
+    @staticmethod
+    def _is_on_friendly_return_path(ct: Controller, pos: Position) -> bool:
+        try:
+            building_id = ct.get_tile_building_id(pos)
+        except Exception:
+            return False
+        if building_id is None:
+            return False
+        if ct.get_team(building_id) != ct.get_team():
+            return False
+        return ct.get_entity_type(building_id) in (
+            EntityType.BRIDGE,
+            EntityType.CONVEYOR,
+            EntityType.ARMOURED_CONVEYOR,
+        )
 
     @staticmethod
     def _is_on_friendly_core(ct: Controller, pos: Position) -> bool:
