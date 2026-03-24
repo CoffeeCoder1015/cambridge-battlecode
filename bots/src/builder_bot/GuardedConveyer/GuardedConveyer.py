@@ -253,9 +253,36 @@ class GuardedConveyer:
             self._log(ct, f"finalize: build result={built}")
             if built and self.complete:
                 self.complete = False
-                self.ore_finalize_phase = "BACKFILL_TO_CORE"
-                self._log(ct, "finalize: generator built, starting conveyor backfill to core")
+                if self._is_adjacent_cardinal(ct.get_position(), ore_pos):
+                    self.ore_finalize_phase = "BACKFILL_TO_CORE"
+                    self._log(ct, "finalize: generator built from cardinal tile, starting backfill")
+                    return True, False
+
+                self.ore_finalize_phase = "ALIGN_TO_CARDINAL"
+                self._log(
+                    ct,
+                    (
+                        "finalize: generator built from diagonal tile; "
+                        "moving to cardinal adjacent tile before backfill"
+                    ),
+                )
+
+                moved_now = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
+                return moved_now, False
             return built, False
+
+        if self.ore_finalize_phase == "ALIGN_TO_CARDINAL":
+            if self._is_adjacent_cardinal(my_pos, ore_pos):
+                self.ore_finalize_phase = "BACKFILL_TO_CORE"
+                self._log(ct, "finalize: now cardinal-adjacent to ore, starting backfill")
+                return False, False
+
+            moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
+            if moved:
+                return True, False
+
+            self._log(ct, "finalize: waiting for path to cardinal-adjacent ore tile")
+            return False, False
 
         if self.ore_finalize_phase == "BACKFILL_TO_CORE":
             if self._is_on_friendly_core(ct, my_pos):
@@ -335,7 +362,7 @@ class GuardedConveyer:
                 env = ct.get_tile_env(tile)
             except Exception:
                 continue
-            if env in (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
+            if env == Environment.ORE_TITANIUM:
                 ores.append(tile)
         return ores
 
@@ -345,7 +372,7 @@ class GuardedConveyer:
         except Exception:
             return False
 
-        if env in (Environment.WALL, Environment.ORE_TITANIUM, Environment.ORE_AXIONITE):
+        if env in (Environment.WALL, Environment.ORE_TITANIUM):
             return False
 
         bot_id = ct.get_tile_builder_bot_id(pos)
@@ -564,7 +591,6 @@ class GuardedConveyer:
             if env in (
                 Environment.EMPTY,
                 Environment.ORE_TITANIUM,
-                Environment.ORE_AXIONITE,
             ):
                 unresolved = True
                 if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
@@ -697,7 +723,6 @@ class GuardedConveyer:
             if env in (
                 Environment.EMPTY,
                 Environment.ORE_TITANIUM,
-                Environment.ORE_AXIONITE,
             ):
                 unresolved = True
                 if ct.get_action_cooldown() == 0 and ct.can_build_barrier(target):
@@ -810,6 +835,49 @@ class GuardedConveyer:
         if d in CARDINAL_DIRECTIONS:
             return d
         return None
+
+    def _move_to_cardinal_adjacent_tile(self, ct: Controller, ore_pos: Position) -> bool:
+        my_pos = ct.get_position()
+        if self._is_adjacent_cardinal(my_pos, ore_pos):
+            return False
+
+        candidates: list[tuple[int, Position, Direction]] = []
+        for move_dir in CARDINAL_DIRECTIONS:
+            nxt = my_pos.add(move_dir)
+            if not self._is_adjacent_cardinal(nxt, ore_pos):
+                continue
+            if not ct.can_move(move_dir):
+                continue
+            dist_to_core_sq = self._core_distance_sq_from_tile(ct, nxt)
+            candidates.append((dist_to_core_sq, nxt, move_dir))
+
+        if not candidates:
+            return False
+
+        # Prefer stepping to the cardinal-adjacent tile closest to friendly core.
+        candidates.sort(key=lambda item: (item[0], item[1].x, item[1].y))
+        best_dir = candidates[0][2]
+        ct.move(best_dir)
+        self._log(ct, f"finalize: aligned to cardinal-adjacent ore tile via {best_dir}")
+        return True
+
+    def _core_distance_sq_from_tile(self, ct: Controller, pos: Position) -> int:
+        best: int | None = None
+        for d in CARDINAL_DIRECTIONS:
+            check = pos.add(d)
+            building_id = ct.get_tile_building_id(check)
+            if building_id is None:
+                continue
+            if (
+                ct.get_entity_type(building_id) == EntityType.CORE
+                and ct.get_team(building_id) == ct.get_team()
+            ):
+                dist_sq = (pos.x - check.x) ** 2 + (pos.y - check.y) ** 2
+                if best is None or dist_sq < best:
+                    best = dist_sq
+        if best is not None:
+            return best
+        return ct.get_map_width() * ct.get_map_width() + ct.get_map_height() * ct.get_map_height()
 
     @staticmethod
     def _find_marker_at(ct: Controller, pos: Position) -> int | None:
