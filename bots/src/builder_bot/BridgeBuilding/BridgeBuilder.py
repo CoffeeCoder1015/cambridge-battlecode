@@ -7,7 +7,6 @@ from ..Movement.TangentBug import TangentBug
 
 ORE_ENVS = (Environment.ORE_TITANIUM,)
 ACTION_RADIUS_SQ = 2
-MAX_GREEDY_MOVES = 7  # strictly less than 8
 BRIDGE_BUILDER_DEBUG_PRINTS = True
 CARDINAL_DIRECTIONS = (
     Direction.NORTH,
@@ -21,6 +20,8 @@ class BridgeBuilder:
     def __init__(self) -> None:
         self.debug_prints = BRIDGE_BUILDER_DEBUG_PRINTS
         self.ore_target: tuple[int, int] | None = None
+        self._ore_nav_target: tuple[int, int] | None = None
+        self._ore_nav = TangentBug()
         self._remembered_ore_target: tuple[int, int] | None = None
         self._remembered_ore_nav_target: tuple[int, int] | None = None
         self._remembered_ore_nav = TangentBug()
@@ -72,7 +73,7 @@ class BridgeBuilder:
 
         if self._resume_random_after_bridge:
             self._resume_random_after_bridge = False
-            self.ore_target = None
+            self._clear_primary_ore_target()
             if self._start_remembered_ore_navigation(ct):
                 return self._advance_remembered_ore_navigation(ct)
             self._log(ct, "bridge cycle complete at core, re-entering random exploration")
@@ -84,13 +85,24 @@ class BridgeBuilder:
         if self.ore_target is not None:
             if self.ore_target not in visible_ores:
                 self._log(ct, f"dropping ore target {self.ore_target} (no longer visible)")
-                self.ore_target = None
+                self._clear_primary_ore_target()
             elif self._ore_has_completed_extractor(
                 ct,
                 Position(self.ore_target[0], self.ore_target[1]),
             ):
                 self._log(ct, f"dropping ore target {self.ore_target} (already harvested)")
-                self.ore_target = None
+                self._clear_primary_ore_target()
+            else:
+                blocking_type = self._ore_blocking_structure_type(
+                    ct,
+                    Position(self.ore_target[0], self.ore_target[1]),
+                )
+                if blocking_type is not None:
+                    self._log(
+                        ct,
+                        f"dropping ore target {self.ore_target} (blocked by {blocking_type})",
+                    )
+                    self._clear_primary_ore_target()
 
         if self.ore_target is None:
             self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores)
@@ -108,25 +120,32 @@ class BridgeBuilder:
             self._log(ct, f"ore {self.ore_target} in action radius, trying build")
             built = self._build_generator_on_ore(ct, ore_pos)
             if built:
-                self.ore_target = None
+                self._clear_primary_ore_target()
                 self._start_post_build_alignment(ct, ore_pos)
             else:
+                blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+                if blocking_type is not None:
+                    self._log(
+                        ct,
+                        (
+                            f"forfeiting ore {self.ore_target}: "
+                            f"blocked by non-road entity {blocking_type}"
+                        ),
+                    )
+                    self._clear_primary_ore_target()
+                    return self._run_random_fallback(ct)
                 self._log(ct, "generator build not possible this turn")
             # Keep control while in range so fallback movement does not pull us off target.
             return True
 
-        path = self._greedy_path_to_ore(ct, my_pos, ore_pos, MAX_GREEDY_MOVES)
-        if path is None:
-            self._log(ct, f"could not greedy path to ore {self.ore_target}, returning to random")
-            self.ore_target = None
+        move_dir = self._next_bugnav_move_to_ore(ct, ore_pos)
+        if move_dir is None:
+            self._log(ct, f"could not bugnav path to ore {self.ore_target}, returning to random")
+            self._clear_primary_ore_target()
             return self._run_random_fallback(ct)
 
-        if not path:
-            self._log(ct, "already effectively in range (empty path), holding control")
-            return True
-
-        self._log(ct, f"greedy move toward ore via {path[0]}")
-        self._road_then_move(ct, path[0])
+        self._log(ct, f"bugnav move toward ore via {move_dir}")
+        self._road_then_move(ct, move_dir)
         return True
 
     def _visible_ores_from_scan(self, ct: Controller, symmetry_analyzer: Any | None) -> set[tuple[int, int]]:
@@ -159,26 +178,39 @@ class BridgeBuilder:
         visible_ores: set[tuple[int, int]],
     ) -> tuple[int, int] | None:
         best_target: tuple[int, int] | None = None
-        best_len: int | None = None
+        best_dist_sq: int | None = None
 
         for ox, oy in visible_ores:
             ore_pos = Position(ox, oy)
             if self._ore_has_completed_extractor(ct, ore_pos):
                 self._log(ct, f"ore {(ox, oy)} rejected: harvester/generator already present")
                 continue
-            path = self._greedy_path_to_ore(ct, my_pos, ore_pos, MAX_GREEDY_MOVES)
-            if path is None:
-                self._log(ct, f"ore {(ox, oy)} rejected: no greedy path within <8 moves")
+            blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+            if blocking_type is not None:
+                self._log(
+                    ct,
+                    f"ore {(ox, oy)} rejected: blocked by non-road entity {blocking_type}",
+                )
                 continue
-            path_len = len(path)
-            self._log(ct, f"ore {(ox, oy)} candidate path_len={path_len}")
-            if best_len is None or path_len < best_len:
-                best_len = path_len
+            if not self._has_bugnav_step_to_ore(ct, ore_pos):
+                self._log(ct, f"ore {(ox, oy)} rejected: no bugnav route available")
+                continue
+            dist_sq = (my_pos.x - ox) ** 2 + (my_pos.y - oy) ** 2
+            self._log(ct, f"ore {(ox, oy)} candidate dist_sq={dist_sq}")
+            if best_dist_sq is None or dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
                 best_target = (ox, oy)
 
         if best_target is not None:
-            self._log(ct, f"best ore picked={best_target} with path_len={best_len}")
+            self._log(ct, f"best ore picked={best_target} with dist_sq={best_dist_sq}")
         return best_target
+
+    def _has_bugnav_step_to_ore(self, ct: Controller, ore_pos: Position) -> bool:
+        if self._in_action_radius(ct.get_position(), ore_pos):
+            return True
+        probe = TangentBug()
+        probe.set_target(ore_pos.x, ore_pos.y)
+        return probe.next_move(ct) is not None
 
     def _remember_secondary_ore(
         self,
@@ -199,6 +231,8 @@ class BridgeBuilder:
             ore_pos = Position(ox, oy)
             if self._ore_has_completed_extractor(ct, ore_pos):
                 continue
+            if self._ore_blocking_structure_type(ct, ore_pos) is not None:
+                continue
             dist_sq = (my_pos.x - ox) ** 2 + (my_pos.y - oy) ** 2
             if best_dist_sq is None or dist_sq < best_dist_sq:
                 best_dist_sq = dist_sq
@@ -214,123 +248,17 @@ class BridgeBuilder:
                 ),
             )
 
-    def _greedy_path_to_ore(
-        self,
-        ct: Controller,
-        start: Position,
-        ore_pos: Position,
-        max_moves: int,
-    ) -> list[Direction] | None:
-        if self._in_action_radius(start, ore_pos):
-            self._log(ct, f"already in action radius of ore ({ore_pos.x},{ore_pos.y})")
-            return []
+    def _next_bugnav_move_to_ore(self, ct: Controller, ore_pos: Position) -> Direction | None:
+        target = (ore_pos.x, ore_pos.y)
+        if self._ore_nav_target != target:
+            self._ore_nav_target = target
+            self._ore_nav.set_target(ore_pos.x, ore_pos.y)
+        return self._ore_nav.next_move(ct)
 
-        cur = Position(start.x, start.y)
-        path: list[Direction] = []
-        visited: set[tuple[int, int]] = {(cur.x, cur.y)}
-        map_w = ct.get_map_width()
-        map_h = ct.get_map_height()
-        my_team = ct.get_team()
-        my_id = ct.get_id()
-
-        for _ in range(max_moves):
-            best_dir: Direction | None = None
-            best_dist_sq: int | None = None
-
-            base = cur.direction_to(ore_pos)
-            for move_dir in self._candidate_dirs(base):
-                nxt = cur.add(move_dir)
-                nxt_key = (nxt.x, nxt.y)
-                if nxt_key in visited:
-                    continue
-                if not self._is_step_candidate(ct, nxt, map_w, map_h, my_team, my_id):
-                    continue
-                dist_sq = (nxt.x - ore_pos.x) ** 2 + (nxt.y - ore_pos.y) ** 2
-                if best_dist_sq is None or dist_sq < best_dist_sq:
-                    best_dist_sq = dist_sq
-                    best_dir = move_dir
-
-            if best_dir is None:
-                self._log(
-                    ct,
-                    f"greedy path failed from ({cur.x},{cur.y}) to ore ({ore_pos.x},{ore_pos.y})",
-                )
-                return None
-
-            cur = cur.add(best_dir)
-            path.append(best_dir)
-            visited.add((cur.x, cur.y))
-
-            if self._in_action_radius(cur, ore_pos):
-                self._log(
-                    ct,
-                    f"greedy path success to ore ({ore_pos.x},{ore_pos.y}) in {len(path)} moves",
-                )
-                return path
-
-        self._log(ct, f"greedy path exceeded max_moves={max_moves} for ore ({ore_pos.x},{ore_pos.y})")
-        return None
-
-    @staticmethod
-    def _candidate_dirs(base: Direction) -> tuple[Direction, ...]:
-        if base == Direction.CENTRE:
-            return tuple(d for d in Direction if d != Direction.CENTRE)
-
-        dirs = [base]
-        r = base
-        l = base
-        for _ in range(3):
-            r = r.rotate_right()
-            l = l.rotate_left()
-            dirs.append(r)
-            dirs.append(l)
-        dirs.append(base.opposite())
-
-        seen: set[Direction] = set()
-        ordered: list[Direction] = []
-        for d in dirs:
-            if d == Direction.CENTRE or d in seen:
-                continue
-            seen.add(d)
-            ordered.append(d)
-        return tuple(ordered)
-
-    @staticmethod
-    def _is_step_candidate(
-        ct: Controller,
-        pos: Position,
-        map_w: int,
-        map_h: int,
-        my_team,
-        my_id: int,
-    ) -> bool:
-        if not (0 <= pos.x < map_w and 0 <= pos.y < map_h):
-            return False
-        if not ct.is_in_vision(pos):
-            return False
-
-        try:
-            env = ct.get_tile_env(pos)
-        except Exception:
-            return False
-        if env == Environment.WALL:
-            return False
-
-        building_id = ct.get_tile_building_id(pos)
-        if building_id is not None:
-            b_type = ct.get_entity_type(building_id)
-            if b_type == EntityType.CORE:
-                if ct.get_team(building_id) != my_team:
-                    return False
-            elif b_type not in (
-                EntityType.ROAD,
-                EntityType.CONVEYOR,
-                EntityType.ARMOURED_CONVEYOR,
-            ):
-                return False
-
-        bot_id = ct.get_tile_builder_bot_id(pos)
-        return bot_id is None or bot_id == my_id
+    def _clear_primary_ore_target(self) -> None:
+        self.ore_target = None
+        self._ore_nav_target = None
+        self._ore_nav.reset()
 
     @staticmethod
     def _in_action_radius(my_pos: Position, target: Position) -> bool:
@@ -343,6 +271,17 @@ class BridgeBuilder:
 
         if self._ore_has_completed_extractor(ct, ore_pos):
             self._log(ct, f"ore already has harvester/generator at ({ore_pos.x},{ore_pos.y})")
+            return False
+
+        blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+        if blocking_type is not None:
+            self._log(
+                ct,
+                (
+                    f"cannot build extractor at ({ore_pos.x},{ore_pos.y}); "
+                    f"blocked by non-road entity {blocking_type}"
+                ),
+            )
             return False
 
         if ct.get_action_cooldown() != 0:
@@ -378,6 +317,19 @@ class BridgeBuilder:
 
         generator_type = getattr(EntityType, "GENERATOR", None)
         return generator_type is not None and b_type == generator_type
+
+    @staticmethod
+    def _ore_blocking_structure_type(ct: Controller, ore_pos: Position):
+        try:
+            building_id = ct.get_tile_building_id(ore_pos)
+        except Exception:
+            return None
+        if building_id is None:
+            return None
+        b_type = ct.get_entity_type(building_id)
+        if b_type == EntityType.ROAD:
+            return None
+        return b_type
 
     def _clear_ore_build_obstructions(self, ct: Controller, ore_pos: Position) -> bool:
         acted = False
@@ -646,6 +598,17 @@ class BridgeBuilder:
             )
             self._remembered_ore_target = None
             return False
+        blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+        if blocking_type is not None:
+            self._log(
+                ct,
+                (
+                    f"dropping remembered ore {self._remembered_ore_target} "
+                    f"(blocked by {blocking_type})"
+                ),
+            )
+            self._remembered_ore_target = None
+            return False
 
         self._remembered_ore_nav_target = (tx, ty)
         self._remembered_ore_nav.set_target(tx, ty)
@@ -668,17 +631,27 @@ class BridgeBuilder:
             return self._run_random_fallback(ct)
 
         if self._in_action_radius(my_pos, ore_pos):
-            self._log(ct, f"ore {self.ore_target} in action radius, trying build")
+            self._log(ct, f"remembered ore ({tx},{ty}) in action radius, trying build")
             built = self._build_generator_on_ore(ct, ore_pos)
             if built:
-                self.ore_target = None
+                self._remembered_ore_target = None
+                self._clear_remembered_ore_navigation()
+                self._clear_primary_ore_target()
                 self._start_post_build_alignment(ct, ore_pos)
             else:
-                self._log(ct, "generator build not possible this turn")
-                # THE FIX: If we failed to build and it's NOT just a cooldown issue, the tile is invalid.
-                if ct.get_action_cooldown() == 0:
-                    self._log(ct, f"Abandoning unbuildable ore target {self.ore_target}")
-                    self.ore_target = None 
+                blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+                if blocking_type is not None:
+                    self._log(
+                        ct,
+                        (
+                            f"forfeiting remembered ore ({tx},{ty}): "
+                            f"blocked by non-road entity {blocking_type}"
+                        ),
+                    )
+                    self._remembered_ore_target = None
+                    self._clear_remembered_ore_navigation()
+                    return self._run_random_fallback(ct)
+                self._log(ct, "generator build on remembered ore not possible this turn")
             return True
 
         if self._remembered_ore_nav.target != (tx, ty):
@@ -705,35 +678,41 @@ class BridgeBuilder:
         self._run_post_build_cardinal_alignment(ct)
 
     def _run_post_build_cardinal_alignment(self, ct: Controller) -> bool:
-            if self._post_build_align_ore_target is None:
-                return False # Changed to False
+        if self._post_build_align_ore_target is None:
+            return True
 
-            ox, oy = self._post_build_align_ore_target
-            ore_pos = Position(ox, oy)
-            my_pos = ct.get_position()
-            if self._is_adjacent_cardinal(my_pos, ore_pos):
+        ox, oy = self._post_build_align_ore_target
+        ore_pos = Position(ox, oy)
+        my_pos = ct.get_position()
+        if self._is_adjacent_cardinal(my_pos, ore_pos):
+            self._post_build_align_ore_target = None
+            self._post_generator_bridge_pending = True
+            self._log(
+                ct,
+                (
+                    f"post-build alignment complete at ({my_pos.x},{my_pos.y}); "
+                    "entering post-generator bridge cycle"
+                ),
+            )
+            return True
+
+        moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
+        if moved:
+            new_pos = ct.get_position()
+            if self._is_adjacent_cardinal(new_pos, ore_pos):
                 self._post_build_align_ore_target = None
                 self._post_generator_bridge_pending = True
                 self._log(
                     ct,
                     (
-                        f"post-build alignment complete at ({my_pos.x},{my_pos.y}); "
+                        f"post-build alignment moved to ({new_pos.x},{new_pos.y}); "
                         "entering post-generator bridge cycle"
                     ),
                 )
-                return False # THE FIX: Return False so main() falls through to the bridge cycle!
-
-            moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
-            if moved:
-                new_pos = ct.get_position()
-                if self._is_adjacent_cardinal(new_pos, ore_pos):
-                    self._post_build_align_ore_target = None
-                    self._post_generator_bridge_pending = True
-                    self._log(ct, "post-build alignment moved; entering post-generator bridge cycle")
-                return True
-
-            self._log(ct, f"post-build alignment waiting at ({my_pos.x},{my_pos.y}) for ore ({ox},{oy})")
             return True
+
+        self._log(ct, f"post-build alignment waiting at ({my_pos.x},{my_pos.y}) for ore ({ox},{oy})")
+        return True
 
     def _move_to_cardinal_adjacent_tile(self, ct: Controller, ore_pos: Position) -> bool:
         my_pos = ct.get_position()
