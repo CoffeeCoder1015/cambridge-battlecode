@@ -14,10 +14,13 @@ class SymmetryAnalyzer:
         self.w = w
         self.h = h
         self.ally_core_pos = ally_core_pos
-        self.map_lut = [[LUT.UNEXPLORED] * w for _ in range(h)]
+        self.map_lut = [LUT.UNEXPLORED] * (w * h)
         self.possible_symmetries = ["horizontal", "vertical", "rotational"]
         self.eliminate_core_overlap()
-    
+
+    def _get_idx(self, x: int, y: int) -> int:
+        return y * self.w + x
+
     def eliminate_core_overlap(self):
         """Early elimination based on core position overlap."""
         cx, cy = self.ally_core_pos.x, self.ally_core_pos.y
@@ -57,7 +60,8 @@ class SymmetryAnalyzer:
             return
 
         for pos in nearby_tiles:
-            if self.map_lut[pos.y][pos.x] != LUT.UNEXPLORED:
+            idx = self._get_idx(pos.x, pos.y)
+            if self.map_lut[idx] != LUT.UNEXPLORED:
                 continue
                 
             env = ct.get_tile_env(pos)
@@ -69,24 +73,24 @@ class SymmetryAnalyzer:
                 val = LUT.ORE_AXIONITE
             else:
                 val = LUT.EMPTY
-                
-            if val.value > LUT.EMPTY.value:
-                for sym in self.possible_symmetries[:]:
-                    sym_x, sym_y = pos.x, pos.y
-                    if sym == "horizontal":
-                        sym_x = self.w - 1 - pos.x
-                    elif sym == "vertical":
-                        sym_y = self.h - 1 - pos.y
-                    elif sym == "rotational":
-                        sym_x = self.w - 1 - pos.x
-                        sym_y = self.h - 1 - pos.y
-                        
-                    if 0 <= sym_x < self.w and 0 <= sym_y < self.h:
-                        sym_val = self.map_lut[sym_y][sym_x]
-                        if sym_val != LUT.UNEXPLORED and sym_val != val:
-                            self.possible_symmetries.remove(sym)
-                            
-            self.map_lut[pos.y][pos.x] = val
+
+            for sym in self.possible_symmetries[:]:
+                sym_x, sym_y = pos.x, pos.y
+                if sym == "horizontal":
+                    sym_x = self.w - 1 - pos.x
+                elif sym == "vertical":
+                    sym_y = self.h - 1 - pos.y
+                elif sym == "rotational":
+                    sym_x = self.w - 1 - pos.x
+                    sym_y = self.h - 1 - pos.y
+
+                if 0 <= sym_x < self.w and 0 <= sym_y < self.h:
+                    sym_idx = self._get_idx(sym_x, sym_y)
+                    sym_val = self.map_lut[sym_idx]
+                    if sym_val != LUT.UNEXPLORED and sym_val != val:
+                        self.possible_symmetries.remove(sym)
+
+            self.map_lut[idx] = val
 
     def draw_debug(self, ct: Controller):
         current_pos = ct.get_position()
