@@ -307,11 +307,20 @@ class BridgeBuilder:
         return False
 
     def _ore_has_completed_extractor(self, ct: Controller, ore_pos: Position) -> bool:
-        building_id = ct.get_tile_building_id(ore_pos)
+        if not ct.is_in_vision(ore_pos):
+            return False
+
+        try:
+            building_id = ct.get_tile_building_id(ore_pos)
+        except Exception:
+            return False
         if building_id is None:
             return False
 
-        b_type = ct.get_entity_type(building_id)
+        try:
+            b_type = ct.get_entity_type(building_id)
+        except Exception:
+            return False
         if b_type == EntityType.HARVESTER:
             return True
 
@@ -320,6 +329,8 @@ class BridgeBuilder:
 
     @staticmethod
     def _ore_blocking_structure_type(ct: Controller, ore_pos: Position):
+        if not ct.is_in_vision(ore_pos):
+            return None
         try:
             building_id = ct.get_tile_building_id(ore_pos)
         except Exception:
