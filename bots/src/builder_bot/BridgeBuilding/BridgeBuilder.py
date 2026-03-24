@@ -9,6 +9,12 @@ ORE_ENVS = (Environment.ORE_TITANIUM,)
 ACTION_RADIUS_SQ = 2
 MAX_GREEDY_MOVES = 7  # strictly less than 8
 BRIDGE_BUILDER_DEBUG_PRINTS = True
+CARDINAL_DIRECTIONS = (
+    Direction.NORTH,
+    Direction.EAST,
+    Direction.SOUTH,
+    Direction.WEST,
+)
 
 
 class BridgeBuilder:
@@ -18,6 +24,7 @@ class BridgeBuilder:
         self._remembered_ore_target: tuple[int, int] | None = None
         self._remembered_ore_nav_target: tuple[int, int] | None = None
         self._remembered_ore_nav = TangentBug()
+        self._post_build_align_ore_target: tuple[int, int] | None = None
         self._post_generator_bridge_pending = False
         self._post_bridge_target: tuple[int, int] | None = None
         self._resume_random_after_bridge = False
@@ -38,11 +45,16 @@ class BridgeBuilder:
                 f"main pos=({my_pos.x},{my_pos.y}) ore_target={self.ore_target} "
                 f"remembered_ore_target={self._remembered_ore_target} "
                 f"remembered_nav_target={self._remembered_ore_nav_target} "
+                f"post_build_align_ore={self._post_build_align_ore_target} "
                 f"post_bridge_target={self._post_bridge_target} "
                 f"post_bridge_pending={self._post_generator_bridge_pending} "
                 f"resume_random={self._resume_random_after_bridge}"
             ),
         )
+
+        if self._post_build_align_ore_target is not None:
+            self._log(ct, "continuing post-build cardinal alignment")
+            return self._run_post_build_cardinal_alignment(ct)
 
         if self._remembered_ore_nav_target is not None:
             self._log(ct, "continuing remembered ore navigation")
@@ -95,8 +107,7 @@ class BridgeBuilder:
             built = self._build_generator_on_ore(ct, ore_pos)
             if built:
                 self.ore_target = None
-                self._post_generator_bridge_pending = True
-                self._log(ct, "generator placed, entering post-generator bridge cycle")
+                self._start_post_build_alignment(ct, ore_pos)
             else:
                 self._log(ct, "generator build not possible this turn")
             # Keep control while in range so fallback movement does not pull us off target.
@@ -661,8 +672,7 @@ class BridgeBuilder:
                 self._remembered_ore_target = None
                 self._clear_remembered_ore_navigation()
                 self.ore_target = None
-                self._post_generator_bridge_pending = True
-                self._log(ct, "generator placed on remembered ore, entering post-generator bridge cycle")
+                self._start_post_build_alignment(ct, ore_pos)
             else:
                 self._log(ct, "generator build on remembered ore not possible this turn")
             return True
@@ -678,6 +688,76 @@ class BridgeBuilder:
         self._log(ct, f"remembered-ore TangentBug move direction={move_dir}")
         self._road_then_move(ct, move_dir)
         return True
+
+    def _start_post_build_alignment(self, ct: Controller, ore_pos: Position) -> None:
+        self._post_build_align_ore_target = (ore_pos.x, ore_pos.y)
+        self._log(
+            ct,
+            (
+                f"generator placed at ({ore_pos.x},{ore_pos.y}); "
+                "aligning to cardinal-adjacent tile before bridge cycle"
+            ),
+        )
+        self._run_post_build_cardinal_alignment(ct)
+
+    def _run_post_build_cardinal_alignment(self, ct: Controller) -> bool:
+        if self._post_build_align_ore_target is None:
+            return True
+
+        ox, oy = self._post_build_align_ore_target
+        ore_pos = Position(ox, oy)
+        my_pos = ct.get_position()
+        if self._is_adjacent_cardinal(my_pos, ore_pos):
+            self._post_build_align_ore_target = None
+            self._post_generator_bridge_pending = True
+            self._log(
+                ct,
+                (
+                    f"post-build alignment complete at ({my_pos.x},{my_pos.y}); "
+                    "entering post-generator bridge cycle"
+                ),
+            )
+            return True
+
+        moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
+        if moved:
+            new_pos = ct.get_position()
+            if self._is_adjacent_cardinal(new_pos, ore_pos):
+                self._post_build_align_ore_target = None
+                self._post_generator_bridge_pending = True
+                self._log(
+                    ct,
+                    (
+                        f"post-build alignment moved to ({new_pos.x},{new_pos.y}); "
+                        "entering post-generator bridge cycle"
+                    ),
+                )
+            return True
+
+        self._log(ct, f"post-build alignment waiting at ({my_pos.x},{my_pos.y}) for ore ({ox},{oy})")
+        return True
+
+    def _move_to_cardinal_adjacent_tile(self, ct: Controller, ore_pos: Position) -> bool:
+        my_pos = ct.get_position()
+        for move_dir in CARDINAL_DIRECTIONS:
+            nxt = my_pos.add(move_dir)
+            if not self._is_adjacent_cardinal(nxt, ore_pos):
+                continue
+            if ct.can_move(move_dir):
+                ct.move(move_dir)
+                self._log(
+                    ct,
+                    (
+                        f"post-build alignment moved {move_dir} "
+                        f"to cardinal-adjacent tile ({nxt.x},{nxt.y})"
+                    ),
+                )
+                return True
+        return False
+
+    @staticmethod
+    def _is_adjacent_cardinal(a: Position, b: Position) -> bool:
+        return abs(a.x - b.x) + abs(a.y - b.y) == 1
 
     def _finish_bridge_cycle_to_core(self, ct: Controller) -> None:
         self._log(ct, "bridge target is on friendly core tile, exiting bridge cycle")
