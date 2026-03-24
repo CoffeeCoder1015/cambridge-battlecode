@@ -1,255 +1,142 @@
-# AGENTS.md - Cambridge Battlecode Bot Development Guide
+# Cambridge Battlecode Agent Guidelines
 
-This document provides guidelines for agents working on this Cambridge Battlecode bot repository.
-
----
-
-## 1. Project Overview
-
-Cambridge Battlecode is a real-time strategy game where you program bots to compete. Each unit (Core, Builder Bot, turrets) runs its own `Player` instance. The engine calls `run(controller)` once per round.
-
-- **Language**: Python 3.12+
-- **Game Engine**: `cambc` CLI and Python module (Rust-based)
-- **Bot Directory**: `bots/`
-- **Map Directory**: `maps/`
-- **Config**: `cambc.toml`
+Welcome, AI Coding Agents! This document provides crucial context, commands, and conventions for operating within the Cambridge Battlecode Python repository. Read carefully before making modifications or implementing new bots.
 
 ---
 
-## 2. Build, Run & Test Commands
+## 1. Build, Lint, and Test Commands
 
-### Running Local Matches
+Unlike traditional web projects, this repository does not use `pytest` or a standard unit testing framework. "Testing" in Battlecode consists of running your bot against other bots or itself on various maps. 
 
-```bash
-# Run a match between two bots
-cambc run <bot_a> <bot_b> [map]
+### Running Matches (Testing)
 
-# Examples
-cambc run starter starter
-cambc run my_bot opponent --seed 42
-cambc run my_bot opponent maps/custom.map26
-cambc run my_bot opponent --replay out.replay26
-
-# Auto-open visualiser after match
-cambc run --watch my_bot opponent
-```
-
-### Viewing Replays
-
-```bash
-cambc watch replay.replay26
-cambc watch --match <match_id>
-cambc watch --match <match_id> --game 3
-```
-
-### Remote Test Runs (2ms time limit enforced)
-
-```bash
-# Authenticate first
-cambc login
-
-# Run test match
-cambc test-run my_bot opponent
-cambc test-run my_bot opponent maps/custom.map26
-```
-
-### Submitting Bots
-
-```bash
-cambc submit ./my_bot/    # directory (auto-zipped)
-cambc submit my_bot.py    # single file
-cambc submit my_bot.zip   # pre-zipped
-```
-
-### Other CLI Commands
-
-```bash
-cambc --version           # Check version
-cambc status              # Show team rating and status
-cambc matches             # List recent matches
-cambc teams search <query>  # Search teams
-```
-
----
-
-## 3. Code Style Guidelines
-
-### General Principles
-
-- Keep code simple and readable - bots run with a strict 2ms CPU time limit
-- Avoid expensive operations in the game loop
-- Use local variables over repeated method calls
-- Profile code if performance is a concern
-
-### Imports
-
-```python
-# Standard library first
-import random
-from collections import deque
-
-# Third-party (cambc is the main one)
-from cambc import Controller, Direction, EntityType, Environment, Position
-
-# Local imports
-import core
-import builder_bot
-```
-
-- Use wildcard import (`from cambc import *`) to get all game types
-- Separate import groups with blank lines
-- Sort imports alphabetically within groups
-
-### Type Hints
-
-```python
-# Use type hints for function signatures
-def run(ct: Controller, player) -> None:
-    etype: EntityType = ct.get_entity_type()
-
-# Simple types can be inline; complex types can be explicit
-def some_function(items: list[int]) -> dict[str, int]:
-```
-
-### Naming Conventions
-
-- **Classes**: `PascalCase` (e.g., `Player`, `BuilderBot`)
-- **Functions/variables**: `snake_case` (e.g., `run`, `num_spawned`)
-- **Constants**: `UPPER_SNAKE_CASE` (e.g., `DIRECTIONS`)
-- **Files**: `snake_case.py`
-- Abbreviations: Use full words (e.g., `builder_bot` not `builderbot`)
-
-### Code Organization
-
-```
-bots/
-├── starter/           # Example bot
-│   └── main.py       # Contains Player class
-├── src/              # Another example
-│   ├── main.py
-│   ├── core.py
-│   └── builder_bot.py
-└── q_learning/       # Q-learning bot
-    ├── main.py
-    ├── core.py
-    └── builder_bot.py
-```
-
-Each bot needs a `main.py` with a `Player` class:
-
-```python
-from cambc import Controller, EntityType
-
-class Player:
-    def __init__(self):
-        self.state = 0
-
-    def run(self, ct: Controller) -> None:
-        etype = ct.get_entity_type()
-        if etype == EntityType.CORE:
-            # handle core logic
-        elif etype == EntityType.BUILDER_BOT:
-            # handle builder bot logic
-```
-
-### Error Handling
-
-- Use `GameError` for game logic errors (raised by `cambc` on invalid actions)
-- Always check `can_*` methods before actions:
-  ```python
-  if ct.can_spawn(spawn_pos):
-      ct.spawn_builder(spawn_pos)
+The `cambc` CLI is the primary tool for testing. 
+- **Run a Local Match:** (No time limit, generates a replay)
+  ```bash
+  cambc run <bot_a> <bot_b> [map]
   ```
-- Wrap action logic in try/except if you want graceful handling:
-  ```python
-  try:
-      ct.move(direction)
-  except GameError:
-      pass  # action wasn't valid
+  *Examples:* 
+  `cambc run starter starter` (bot vs itself)
+  `cambc run my_bot opponent --seed 42` (deterministic seed)
+  `cambc run my_bot opponent maps/custom.map26` (run on a specific custom map)
+- **Watch a Replay:**
+  ```bash
+  cambc watch replay.replay26
+  ```
+- **Run + Auto-open Visualiser:**
+  ```bash
+  cambc run --watch my_bot opponent
   ```
 
-### Formatting
+### Remote Test Runs (Strict Enforcement)
 
-- Maximum line length: 100 characters (soft guideline)
-- Use 4 spaces for indentation
-- One blank line between top-level definitions
-- No trailing whitespace
-- The project uses **ruff** for linting
+Local matches do NOT enforce the 2ms time limit. To ensure your bot won't time out in the actual tournament, use `test-run`. This runs on AWS hardware matching the official ladder.
+- **Run a Remote Test Match:**
+  ```bash
+  cambc test-run my_bot opponent
+  ```
+  *(Note: Rate limited to 10 matches per 5 minutes. Requires running `cambc login` once first).*
 
-### Linting
+### Linting & Formatting
 
-```bash
-# Install ruff if needed
-pip install ruff
-
-# Run linting
-ruff check bots/
-
-# Format code
-ruff format bots/
-```
-
----
-
-## 4. Debugging
-
-- `print()` statements are captured to the replay
-- `stderr` prints to console in real time
-- Visual debug overlays:
-  ```python
-  c.draw_indicator_line(pos_a, pos_b, r, g, b)
-  c.draw_indicator_dot(pos, r, g, b)
+This project uses `ruff` (indicated by `.ruff_cache`) for fast linting and formatting. Always format your code before committing.
+- **Check for Lint Errors:** 
+  ```bash
+  ruff check .
+  ```
+- **Auto-Fix Lint Errors:** 
+  ```bash
+  ruff check . --fix
+  ```
+- **Format Code:** 
+  ```bash
+  ruff format .
   ```
 
----
+### Submitting
 
-## 5. Bot Requirements
-
-| Constraint | Limit |
-|------------|-------|
-| Zip size | 5 MB max |
-| Decompressed size | 50 MB max |
-| File count | 500 files max |
-| Native extensions | Not allowed |
-| CPU time | 2ms per unit per round |
-
-- Must contain a `main.py` with a `Player` class
-- Imports must be top-level (file I/O is blocked during `run()`)
+Once a bot is ready for the tournament ladder:
+- **Submit Directory:** `cambc submit ./bots/my_bot/` (auto-zips and uploads)
+- **Submit Zip:** `cambc submit my_bot.zip`
 
 ---
 
-## 6. Example Bot Structure
+## 2. Code Style & Conventions
 
-```python
-"""Bot description here."""
+Adhere to the following conventions to ensure high-performance, compliant, and readable bots.
 
-import random
-from cambc import *
+### Architecture & Engine Rules
 
-class Player:
-    def __init__(self):
-        self.num_spawned = 0
+1. **Entry Point:** Every bot must be housed in its own directory (e.g., `bots/my_bot/`) and MUST contain a `main.py` file defining a `Player` class.
+2. **The `run` Method:** The engine instantiates `Player` once per unit. Every round the unit is alive, the engine calls `def run(self, ct: Controller) -> None:`.
+3. **No File I/O:** File operations (read/write) are strictly blocked during the `run()` loop. Do not attempt to read config files dynamically.
+4. **Top-Level Imports:** All imports MUST be at the top level. Dynamic `import()` calls inside functions will fail due to the file I/O block.
+5. **No Native Extensions:** Python native extensions (`.so`, `.pyd`, `.dll`) are strictly prohibited. The bot must be pure Python.
+6. **Time Constraints:** Bots have a strict **2ms** time limit per turn per unit.
+   - Avoid complex pathfinding (like A*) across the entire map every turn.
+   - Cache expensive calculations in `self`.
+   - Use simple heuristics and state machines to ensure fast execution.
 
-    def run(self, ct: Controller) -> None:
-        etype = ct.get_entity_type()
-        if etype == EntityType.CORE:
-            # Core logic
-            if ct.can_spawn(some_pos):
-                ct.spawn_builder(some_pos)
-        elif etype == EntityType.BUILDER_BOT:
-            # Builder bot logic
-            pass
-```
+### Python Style & Typing
+
+- **Python Version:** Target Python 3.12+. Utilize modern typing features (`|` for unions, `list[int]`, etc.).
+- **Naming Conventions:**
+  - Classes: `PascalCase` (e.g., `BuilderBot`, `Harvester`).
+  - Functions & Variables: `snake_case` (e.g., `get_enemy_core`, `reserve_buffer`).
+  - Constants: `UPPER_SNAKE_CASE` (e.g., `DRAIN_WAVE_DURATION`, `MAX_TURNS`).
+- **Imports Structure:** Group imports logically with blank lines between groups:
+  ```python
+  import sys
+  from collections import deque
+
+  from cambc import Controller, Direction, EntityType, Position
+
+  from core import Core
+  from builder_bot import BuilderBot
+  ```
+- **Type Hinting:** Extensively use type hints. The `Controller` API must be typed to enable autocomplete and clarity.
+  ```python
+  class Player:
+      def __init__(self) -> None:
+          self.active_role: Core | BuilderBot | None = None
+
+      def run(self, ct: Controller) -> None:
+          pass
+  ```
+
+### State Management & Error Handling
+
+- **Check Before Action:** The engine will raise exceptions or ignore commands if you attempt invalid actions (e.g., moving into a wall, spawning without resources). ALWAYS check capability first:
+  ```python
+  if ct.get_action_cooldown() == 0 and ct.can_spawn(target_pos):
+      ct.spawn_builder(target_pos)
+  ```
+- **Cooldown Tracking:** Movement and actions have separate cooldowns. Verify them before issuing commands:
+  - `if ct.get_action_cooldown() == 0:`
+  - `if ct.get_movement_cooldown() == 0:`
+- **Exception Prevention over `try/except`:** Do not rely on `try/except` to handle engine rule violations. Use the `can_...` API methods instead to avoid performance overhead.
+
+### Debugging & Logging
+
+Debugging must be done carefully to differentiate between local stdout and visualizer output.
+- **Replay Logs (Per-Unit):** `print("Spawning unit...")`
+  Standard `print()` is captured directly into the `.replay26` file and can be viewed per-unit inside the visualiser.
+- **Real-Time Console Logs:** `print("Fatal state!", file=sys.stderr)`
+  Prints sent to `sys.stderr` appear in the terminal in real-time during local matches.
+- **Visual Overlays:** Use visual debugging directly on the game map:
+  - `ct.draw_indicator_line(pos_a, pos_b, r, g, b)`
+  - `ct.draw_indicator_dot(pos, r, g, b)`
 
 ---
 
-## 7. Key Files
+## 3. Project Structure & Organization
 
-| File | Description |
-|------|-------------|
-| `cambc.toml` | Project config (bots_dir, maps_dir, replay, seed) |
-| `bots/src/main.py` | Example bot entry point |
-| `bots/starter/main.py` | Simple starter bot |
-| `bots/q_learning/` | Q-learning implementation |
-| `docs.md` | Full API reference |
-| `setup.md` | Installation and CLI reference |
+Maintain the standard scaffolding provided by `cambc starter`:
+- `cambc.toml`: Project configuration. Defines `bots_dir` and `maps_dir`.
+- `bots/`: The directory where all bot logic resides. Each bot is a subfolder.
+- `maps/`: Contains `.map26` files for custom map testing.
+
+If you create a new bot, place it in `bots/<new_bot_name>/` and ensure it has a `main.py`.
+
+## 4. Cursor / Copilot Integration
+*(No pre-existing `.cursorrules` or `.github/copilot-instructions.md` were found in this repository. Ensure any generated code adheres strictly to the guidelines above, especially regarding the lack of file I/O during execution.)*
