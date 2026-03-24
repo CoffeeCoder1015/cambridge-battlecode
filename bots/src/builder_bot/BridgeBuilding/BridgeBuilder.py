@@ -8,13 +8,16 @@ from ..Movement.TangentBug import TangentBug
 ORE_ENVS = (Environment.ORE_TITANIUM, Environment.ORE_AXIONITE)
 ACTION_RADIUS_SQ = 2
 MAX_GREEDY_MOVES = 7  # strictly less than 8
-BRIDGE_BUILDER_DEBUG_PRINTS = False
+BRIDGE_BUILDER_DEBUG_PRINTS = True
 
 
 class BridgeBuilder:
     def __init__(self) -> None:
         self.debug_prints = BRIDGE_BUILDER_DEBUG_PRINTS
         self.ore_target: tuple[int, int] | None = None
+        self._remembered_ore_target: tuple[int, int] | None = None
+        self._remembered_ore_nav_target: tuple[int, int] | None = None
+        self._remembered_ore_nav = TangentBug()
         self._post_generator_bridge_pending = False
         self._post_bridge_target: tuple[int, int] | None = None
         self._resume_random_after_bridge = False
@@ -33,11 +36,17 @@ class BridgeBuilder:
             ct,
             (
                 f"main pos=({my_pos.x},{my_pos.y}) ore_target={self.ore_target} "
+                f"remembered_ore_target={self._remembered_ore_target} "
+                f"remembered_nav_target={self._remembered_ore_nav_target} "
                 f"post_bridge_target={self._post_bridge_target} "
                 f"post_bridge_pending={self._post_generator_bridge_pending} "
                 f"resume_random={self._resume_random_after_bridge}"
             ),
         )
+
+        if self._remembered_ore_nav_target is not None:
+            self._log(ct, "continuing remembered ore navigation")
+            return self._advance_remembered_ore_navigation(ct)
 
         if self._post_bridge_target is not None:
             self._log(ct, "continuing post-bridge navigation")
@@ -50,6 +59,8 @@ class BridgeBuilder:
         if self._resume_random_after_bridge:
             self._resume_random_after_bridge = False
             self.ore_target = None
+            if self._start_remembered_ore_navigation(ct):
+                return self._advance_remembered_ore_navigation(ct)
             self._log(ct, "bridge cycle complete at core, re-entering random exploration")
             return self._run_random_fallback(ct)
 
@@ -70,6 +81,8 @@ class BridgeBuilder:
         if self.ore_target is None:
             self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores)
             self._log(ct, f"selected reachable ore target={self.ore_target}")
+
+        self._remember_secondary_ore(ct, my_pos, visible_ores)
 
         if self.ore_target is None:
             self._log(ct, "no reachable ore, falling back to random exploration")
@@ -154,6 +167,40 @@ class BridgeBuilder:
             self._log(ct, f"best ore picked={best_target} with path_len={best_len}")
         return best_target
 
+    def _remember_secondary_ore(
+        self,
+        ct: Controller,
+        my_pos: Position,
+        visible_ores: set[tuple[int, int]],
+    ) -> None:
+        if self.ore_target is None:
+            return
+
+        best_alt: tuple[int, int] | None = None
+        best_dist_sq: int | None = None
+
+        for ox, oy in visible_ores:
+            ore = (ox, oy)
+            if ore == self.ore_target:
+                continue
+            ore_pos = Position(ox, oy)
+            if self._ore_has_completed_extractor(ct, ore_pos):
+                continue
+            dist_sq = (my_pos.x - ox) ** 2 + (my_pos.y - oy) ** 2
+            if best_dist_sq is None or dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best_alt = ore
+
+        if best_alt is not None and best_alt != self._remembered_ore_target:
+            self._remembered_ore_target = best_alt
+            self._log(
+                ct,
+                (
+                    f"remembered secondary ore target={best_alt} "
+                    f"while pursuing primary target={self.ore_target}"
+                ),
+            )
+
     def _greedy_path_to_ore(
         self,
         ct: Controller,
@@ -168,6 +215,10 @@ class BridgeBuilder:
         cur = Position(start.x, start.y)
         path: list[Direction] = []
         visited: set[tuple[int, int]] = {(cur.x, cur.y)}
+        map_w = ct.get_map_width()
+        map_h = ct.get_map_height()
+        my_team = ct.get_team()
+        my_id = ct.get_id()
 
         for _ in range(max_moves):
             best_dir: Direction | None = None
@@ -179,7 +230,7 @@ class BridgeBuilder:
                 nxt_key = (nxt.x, nxt.y)
                 if nxt_key in visited:
                     continue
-                if not self._is_step_candidate(ct, nxt):
+                if not self._is_step_candidate(ct, nxt, map_w, map_h, my_team, my_id):
                     continue
                 dist_sq = (nxt.x - ore_pos.x) ** 2 + (nxt.y - ore_pos.y) ** 2
                 if best_dist_sq is None or dist_sq < best_dist_sq:
@@ -231,8 +282,16 @@ class BridgeBuilder:
             ordered.append(d)
         return tuple(ordered)
 
-    def _is_step_candidate(self, ct: Controller, pos: Position) -> bool:
-        if not (0 <= pos.x < ct.get_map_width() and 0 <= pos.y < ct.get_map_height()):
+    @staticmethod
+    def _is_step_candidate(
+        ct: Controller,
+        pos: Position,
+        map_w: int,
+        map_h: int,
+        my_team,
+        my_id: int,
+    ) -> bool:
+        if not (0 <= pos.x < map_w and 0 <= pos.y < map_h):
             return False
         if not ct.is_in_vision(pos):
             return False
@@ -247,19 +306,18 @@ class BridgeBuilder:
         building_id = ct.get_tile_building_id(pos)
         if building_id is not None:
             b_type = ct.get_entity_type(building_id)
-            if b_type in (EntityType.ROAD, EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
-                pass
-            elif b_type == EntityType.CORE:
-                if ct.get_team(building_id) != ct.get_team():
+            if b_type == EntityType.CORE:
+                if ct.get_team(building_id) != my_team:
                     return False
-            else:
+            elif b_type not in (
+                EntityType.ROAD,
+                EntityType.CONVEYOR,
+                EntityType.ARMOURED_CONVEYOR,
+            ):
                 return False
 
         bot_id = ct.get_tile_builder_bot_id(pos)
-        if bot_id is not None and bot_id != ct.get_id():
-            return False
-
-        return True
+        return bot_id is None or bot_id == my_id
 
     @staticmethod
     def _in_action_radius(my_pos: Position, target: Position) -> bool:
@@ -557,6 +615,69 @@ class BridgeBuilder:
         self._post_generator_bridge_pending = False
         self._post_bridge_target = None
         self._post_bridge_nav.reset()
+
+    def _clear_remembered_ore_navigation(self) -> None:
+        self._remembered_ore_nav_target = None
+        self._remembered_ore_nav.reset()
+
+    def _start_remembered_ore_navigation(self, ct: Controller) -> bool:
+        if self._remembered_ore_target is None:
+            return False
+
+        tx, ty = self._remembered_ore_target
+        ore_pos = Position(tx, ty)
+        if self._ore_has_completed_extractor(ct, ore_pos):
+            self._log(
+                ct,
+                f"dropping remembered ore {self._remembered_ore_target} (already harvested)",
+            )
+            self._remembered_ore_target = None
+            return False
+
+        self._remembered_ore_nav_target = (tx, ty)
+        self._remembered_ore_nav.set_target(tx, ty)
+        self._log(ct, f"bridge cycle complete at core, bugnav to remembered ore {(tx, ty)}")
+        return True
+
+    def _advance_remembered_ore_navigation(self, ct: Controller) -> bool:
+        if self._remembered_ore_nav_target is None:
+            return False
+
+        tx, ty = self._remembered_ore_nav_target
+        ore_pos = Position(tx, ty)
+        my_pos = ct.get_position()
+        self._log(ct, f"remembered-ore nav at ({my_pos.x},{my_pos.y}) -> ({tx},{ty})")
+
+        if self._ore_has_completed_extractor(ct, ore_pos):
+            self._log(ct, f"remembered ore ({tx},{ty}) already harvested, aborting remembered nav")
+            self._remembered_ore_target = None
+            self._clear_remembered_ore_navigation()
+            return self._run_random_fallback(ct)
+
+        if self._in_action_radius(my_pos, ore_pos):
+            self._log(ct, f"remembered ore ({tx},{ty}) in action radius, trying build")
+            built = self._build_generator_on_ore(ct, ore_pos)
+            if built:
+                self._remembered_ore_target = None
+                self._clear_remembered_ore_navigation()
+                self.ore_target = None
+                self._post_generator_bridge_pending = True
+                self._log(ct, "generator placed on remembered ore, entering post-generator bridge cycle")
+            else:
+                self._log(ct, "generator build on remembered ore not possible this turn")
+            return True
+
+        if self._remembered_ore_nav.target != (tx, ty):
+            self._remembered_ore_nav.set_target(tx, ty)
+
+        move_dir = self._remembered_ore_nav.next_move(ct)
+        if move_dir is None:
+            self._log(ct, "remembered-ore TangentBug returned no move this turn")
+            return True
+
+        self._log(ct, f"remembered-ore TangentBug move direction={move_dir}")
+        self._road_then_move(ct, move_dir)
+        return True
 
     def _finish_bridge_cycle_to_core(self, ct: Controller) -> None:
         self._log(ct, "bridge target is on friendly core tile, exiting bridge cycle")
