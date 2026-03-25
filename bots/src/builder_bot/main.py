@@ -8,7 +8,9 @@ from .Movement.Hound import Hound
 from .BridgeBuilding.BridgeBuilder import BridgeBuilder
 from .helpers import execute_nav_step, refresh_core_pos, set_nav_target
 
-DEBUG_PRINTS = False
+SYMMETRY_DEBUG_PRINTS = False
+HOUND_DEBUG_PRINTS = False
+TANGENTBUG_DEBUG_PRINTS = False
 
 
 class BuilderBot:
@@ -16,10 +18,13 @@ class BuilderBot:
         self.symmetry_analyzer: SymmetryAnalyzer | None = None
         self.signal_propagator: SignalPropagator | None = None
         self.known_symmetry = None
-        self.nav = TangentBug()
+        self.nav = TangentBug(
+            debug_prints=TANGENTBUG_DEBUG_PRINTS,
+            debug_name="builder-main",
+        )
         self.guarded_conveyer = GuardedConveyer()
         self.gaurded_convery_move = GaurdedConveryMove()
-        self.hound = Hound(debug_prints=DEBUG_PRINTS)
+        self.hound = Hound(debug_prints=HOUND_DEBUG_PRINTS)
         self.bridge_builder = BridgeBuilder()
         self._target_set = False
         self.core_pos: tuple[int, int] | None = None
@@ -40,7 +45,7 @@ class BuilderBot:
             self.symmetry_analyzer = SymmetryAnalyzer(
                 ct,
                 core_pos=self.core_pos,
-                debug_prints=DEBUG_PRINTS,
+                debug_prints=SYMMETRY_DEBUG_PRINTS,
             )
         elif self.core_pos is not None:
             self.symmetry_analyzer.update_core_pos(self.core_pos)
@@ -55,7 +60,7 @@ class BuilderBot:
             self.agentmode = "BRIDGE_BUILDER"
             self.agentrole = "Builder"
 
-        if ct.get_current_round() == 400:
+        if ct.get_current_round() == 100000:
             self.agentmode = "BRIDGE_BUILDER"
             self.agentrole = "Builder"
 
