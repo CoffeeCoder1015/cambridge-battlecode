@@ -1,6 +1,5 @@
 from cambc import Position
 from cambc import Environment
-import random
 from cambc import Direction
 import sys
 
@@ -107,7 +106,9 @@ class Hound:
         execute_nav_step,
     ) -> tuple[bool, tuple[int, int] | None]:
         # Priority 1: Attack or approach nearby enemy buildings
-        attack_acted = self.attack(ct, set_nav_target, execute_nav_step)
+        attack_acted = self.attack(
+            ct, set_nav_target, execute_nav_step, enemy_core_target
+        )
         if attack_acted:
             return True, enemy_core_target
 
@@ -120,7 +121,9 @@ class Hound:
         set_nav_target(*enemy_core_target)
         return execute_nav_step(ct), enemy_core_target
 
-    def attack(self, ct: Controller, set_nav_target, execute_nav_step):
+    def attack(
+        self, ct: Controller, set_nav_target, execute_nav_step, enemy_core_target
+    ):
         nearby_buildings = ct.get_nearby_buildings()
         current_position = ct.get_position()
         nearby_enemy_buildings = [
@@ -145,7 +148,11 @@ class Hound:
                     )
                 elif status == "build":
                     return self.build_turret(
-                        ct, set_nav_target, execute_nav_step, target_id
+                        ct,
+                        set_nav_target,
+                        execute_nav_step,
+                        target_id,
+                        enemy_core_target,
                     )
                 elif status == "skip":
                     # All surround tiles blocked by un-removables/allies, move to next item
@@ -225,15 +232,29 @@ class Hound:
         return "skip", None
 
     def build_turret(
-        self, ct: Controller, set_nav_target, execute_nav_step, harvester_id
+        self,
+        ct: Controller,
+        set_nav_target,
+        execute_nav_step,
+        harvester_id,
+        enemy_core_target,
     ):
         harvester_pos = ct.get_position(harvester_id)
 
         for direction in CARDINAL_DIRECTIONS:
             turret_pos = harvester_pos.add(direction)
-            valid_build_directions = DIRECTIONS.copy()
-            valid_build_directions.remove(direction)
-            build_direction = random.choice(valid_build_directions)
+            build_direction = direction
+            if enemy_core_target is not None:
+                core_pos = Position(enemy_core_target[0], enemy_core_target[1])
+                build_direction = turret_pos.direction_to(core_pos)
+
+                # AMMO BLOCKAGE: Don't point directly into the harvester
+                opposite_direction = self.get_opposite_direction(direction)
+                if build_direction == opposite_direction:
+                    build_direction = self.get_diagonal_adjustment(
+                        turret_pos, core_pos, opposite_direction
+                    )
+
             if ct.can_build_sentinel(turret_pos, build_direction):
                 ct.build_sentinel(turret_pos, build_direction)
                 return True
@@ -285,3 +306,30 @@ class Hound:
                 ct.fire(b_pos)
                 return True
         return False
+
+    def get_opposite_direction(self, direction: Direction) -> Direction:
+        mapping = {
+            Direction.NORTH: Direction.SOUTH,
+            Direction.SOUTH: Direction.NORTH,
+            Direction.EAST: Direction.WEST,
+            Direction.WEST: Direction.EAST,
+        }
+        return mapping.get(direction, direction)
+
+    def get_diagonal_adjustment(
+        self, turret_pos: Position, core_pos: Position, blocked_dir: Direction
+    ) -> Direction:
+        # blocked_dir is the cardinal direction pointing to the harvester.
+        # We pick a diagonal adjacent to blocked_dir that points towards the core.
+        dx = core_pos.x - turret_pos.x
+        dy = core_pos.y - turret_pos.y
+
+        if blocked_dir == Direction.NORTH:  # Harvester is North
+            return Direction.NORTHWEST if dx < 0 else Direction.NORTHEAST
+        if blocked_dir == Direction.SOUTH:  # Harvester is South
+            return Direction.SOUTHWEST if dx < 0 else Direction.SOUTHEAST
+        if blocked_dir == Direction.EAST:  # Harvester is East
+            return Direction.NORTHEAST if dy < 0 else Direction.SOUTHEAST
+        if blocked_dir == Direction.WEST:  # Harvester is West
+            return Direction.NORTHWEST if dy < 0 else Direction.SOUTHWEST
+        return blocked_dir
