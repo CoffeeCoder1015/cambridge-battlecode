@@ -11,6 +11,7 @@ This bot:
 
 from cambc import Controller, EntityType
 
+from turret.main import Turret
 from core.main import Core
 from builder_bot.main import BuilderBot
 
@@ -30,4 +31,9 @@ class Player:
         elif etype == EntityType.BUILDER_BOT:
             if self.active is None:
                 self.active = BuilderBot()
+            self.active.run(ct)
+
+        elif etype == EntityType.SENTINEL:
+            if self.active is None:
+                self.active = Turret()
             self.active.run(ct)
