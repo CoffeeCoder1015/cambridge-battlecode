@@ -1,7 +1,7 @@
 from cambc import Environment, Team, EntityType
 import sys
 
-DEBUG_PRINTS = True
+DEBUG_PRINTS = False
 
 '''
 SymmetryAnalyzer:

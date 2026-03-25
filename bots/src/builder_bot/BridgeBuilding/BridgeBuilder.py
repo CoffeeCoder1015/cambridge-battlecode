@@ -8,7 +8,7 @@ from ..Movement.TangentBug import TangentBug
 
 ORE_ENVS = (Environment.ORE_TITANIUM,)
 ACTION_RADIUS_SQ = 2
-BRIDGE_BUILDER_DEBUG_PRINTS = True
+BRIDGE_BUILDER_DEBUG_PRINTS = False
 CARDINAL_DIRECTIONS = (
     Direction.NORTH,
     Direction.EAST,

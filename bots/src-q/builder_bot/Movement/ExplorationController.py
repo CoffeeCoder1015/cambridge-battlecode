@@ -1,5 +1,6 @@
 import random
 import math
+import sys
 from cambc import Controller, Direction, EntityType, Environment, Position
 
 DIR_VECTORS: dict[Direction, tuple[int, int]] = {
@@ -14,6 +15,7 @@ DIR_VECTORS: dict[Direction, tuple[int, int]] = {
 }
 
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
+EXPLORATION_DEBUG_PRINTS = False
 
 
 def dir_dot(a: Direction, b: Direction) -> int:
@@ -67,6 +69,11 @@ class ExplorationController:
         self.ticks_in_quadrant = 0
 
         self._resample_heading(None)
+
+    def _log(self, ct: Controller, message: str) -> None:
+        if not EXPLORATION_DEBUG_PRINTS:
+            return
+        print(f"[{ct.get_id()}][Exploration] {message}", file=sys.stderr)
 
     def _resample_heading(self, ct: Controller | None) -> None:
         if ct is not None:
@@ -158,7 +165,6 @@ class ExplorationController:
             if ct.get_move_cooldown() == 0 and ct.get_action_cooldown() == 0:
                 self.ticks_in_quadrant += 1
                 if self.ticks_in_quadrant > 150:
-                    import sys
                     candidates = [(0, 0), (0, 1), (1, 0), (1, 1)]
                     candidates.remove(quadrant)
                     new_q = random.choice(candidates)
@@ -167,7 +173,13 @@ class ExplorationController:
                     target_pos = Position(int(target_x), int(target_y))
                     new_dir = my_pos.direction_to(target_pos)
                     if new_dir != Direction.CENTRE:
-                        print(f"[{ct.get_id()}] Context Aware: Leaping from {quadrant} to {new_q}. Dir: {new_dir.name}", file=sys.stderr)
+                        self._log(
+                            ct,
+                            (
+                                f"Context Aware: Leaping from {quadrant} to {new_q}. "
+                                f"Dir: {new_dir.name}"
+                            ),
+                        )
                         self.spawn_direction = new_dir
                         self.current_quadrant = new_q
                         self.ticks_in_quadrant = 0
@@ -181,7 +193,6 @@ class ExplorationController:
             if ct.get_move_cooldown() == 0 and ct.get_action_cooldown() == 0:
                 self.stuck_counter += 1
                 if self.stuck_counter >= 5:
-                    import sys
                     valid_bounce_dirs = []
                     for d in DIRECTIONS:
                         if (
@@ -197,7 +208,10 @@ class ExplorationController:
                             self.spawn_direction, ct, my_pos
                         )
 
-                    print(f"[{ct.get_id()}] BOUNCE: {self.spawn_direction.name} -> {new_dir.name}", file=sys.stderr)
+                    self._log(
+                        ct,
+                        f"BOUNCE: {self.spawn_direction.name} -> {new_dir.name}",
+                    )
                     self.spawn_direction = new_dir
                     self.stuck_counter = 0
                     self._resample_heading(ct)
