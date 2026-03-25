@@ -137,6 +137,14 @@ class Hound:
 
         # Physically walk onto the tile if not already there
         if my_pos.x != b_pos.x or my_pos.y != b_pos.y:
+            straight_dir = my_pos.direction_to(b_pos)
+            post_move_pos = my_pos.add(straight_dir)
+            if ct.can_move(straight_dir) and post_move_pos == b_pos:
+                ct.move(straight_dir)
+                if ct.can_fire(b_pos):
+                    ct.fire(b_pos)
+                    return True
+
             set_nav_target(b_pos.x, b_pos.y)
             if execute_nav_step(ct):
                 # Re-check if we reached the tile after moving to fire immediately
