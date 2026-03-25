@@ -158,11 +158,13 @@ class Hound:
     def observe_around_harvester(self, ct: Controller, harvester_pos: Position):
         """
         Scan cardinal tiles around a harvester to decide action:
-        - "attack": found removable enemy infra (road, conveyor, bridge).
+        - "attack": found removable infrastructure (enemy or ally road).
         - "build": at least one empty tile exists for turret placement.
-        - "skip": all empty tiles are blocked by un-removables or ally buildings.
+        - "skip": already 2+ sentinels or all empty tiles are blocked.
         """
         has_empty_tile = False
+        ally_sentinel_count = 0
+        removable_infra_id = None
 
         for direction in CARDINAL_DIRECTIONS:
             tile_pos = harvester_pos.add(direction)
@@ -172,36 +174,51 @@ class Hound:
             ):
                 continue
 
-            tile_env = ct.get_tile_env(tile_pos)
-            if tile_env != Environment.EMPTY:
+            try:
+                tile_env = ct.get_tile_env(tile_pos)
+                if tile_env != Environment.EMPTY:
+                    continue
+
+                tile_building_id = ct.get_tile_building_id(tile_pos)
+                if tile_building_id is None:
+                    # Truly empty and buildable
+                    has_empty_tile = True
+                    continue
+
+                # Building present
+                team = ct.get_team(tile_building_id)
+                building_type = ct.get_entity_type(tile_building_id)
+                if team != ct.get_team():
+                    # Enemy building
+                    if building_type in (
+                        EntityType.ROAD,
+                        EntityType.CONVEYOR,
+                        EntityType.BRIDGE,
+                    ):
+                        removable_infra_id = tile_building_id
+                    # Other enemy buildings (turrets, cores) are un-removable for space-making
+                else:
+                    # Ally building
+                    if building_type == EntityType.SENTINEL:
+                        ally_sentinel_count += 1
+                    elif building_type == EntityType.ROAD:
+                        # Inconsequential ally tiles such as roads can be removed to make room
+                        removable_infra_id = tile_building_id
+            except Exception:
+                # Out of vision or other engine error, skip this tile
                 continue
 
-            tile_building_id = ct.get_tile_building_id(tile_pos)
-            if tile_building_id is None:
-                # Truly empty and buildable
-                has_empty_tile = True
-                continue
+            # Ally harvesters or other buildings block the square
 
-            # Building present
-            team = ct.get_team(tile_building_id)
-            building_type = ct.get_entity_type(tile_building_id)
-            if team != ct.get_team():
-                # Enemy building
-                if building_type in (
-                    EntityType.ROAD,
-                    EntityType.CONVEYOR,
-                    EntityType.BRIDGE,
-                ):
-                    return "attack", tile_building_id
-                # Other enemy buildings (turrets, cores) are un-removable for space-making
-            else:
-                # Ally building
-                if building_type == EntityType.ROAD:
-                    # Inconsequential ally tiles such as roads can be removed to make room
-                    return "attack", tile_building_id
+        # PRIORITY GATE: If we already have enough sentinels, skip all building/clearing
+        if ally_sentinel_count >= 2:
+            return "skip", None
 
-            # Ally buildings (harvesters, conveyors, turrets) or non-removable enemy buildings block the square
+        # Next: make room if needed
+        if removable_infra_id is not None:
+            return "attack", removable_infra_id
 
+        # Next: build if empty tile exists
         if has_empty_tile:
             return "build", None
 
