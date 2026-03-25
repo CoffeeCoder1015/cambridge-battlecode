@@ -1,6 +1,6 @@
 import sys
 
-from cambc import Controller
+from cambc import Controller, EntityType
 
 from ..Offense.BreakBridges import BreakBridges
 
@@ -17,6 +17,34 @@ class Hound:
             f"[Hound][R{ct.get_current_round()}][id={ct.get_id()}] {message}",
             file=sys.stderr,
         )
+
+    def _try_attack_underfoot_enemy_bridge(self, ct: Controller) -> bool:
+        my_pos = ct.get_position()
+        building_id = ct.get_tile_building_id(my_pos)
+        if building_id is None:
+            return False
+
+        try:
+            building_type = ct.get_entity_type(building_id)
+            building_team = ct.get_team(building_id)
+        except Exception:
+            return False
+
+        if building_type != EntityType.BRIDGE or building_team == ct.get_team():
+            return False
+
+        if ct.can_fire(my_pos):
+            ct.fire(my_pos)
+            self._log(
+                ct,
+                f"on enemy bridge and fired underfoot at ({my_pos.x},{my_pos.y})",
+            )
+        else:
+            self._log(
+                ct,
+                f"on enemy bridge but cannot fire underfoot this turn at ({my_pos.x},{my_pos.y})",
+            )
+        return True
 
     def compute_enemy_core_target(
         self,
@@ -95,13 +123,9 @@ class Hound:
             if bridge_target is not None:
                 my_pos = ct.get_position()
                 if my_pos.x == bridge_target.x and my_pos.y == bridge_target.y:
-                    self._log(
-                        ct,
-                        (
-                            "holding on enemy bridge at "
-                            f"({bridge_target.x},{bridge_target.y})"
-                        ),
-                    )
+                    if self._try_attack_underfoot_enemy_bridge(ct):
+                        return True, enemy_core_target
+                    self._log(ct, "underfoot tile no longer enemy bridge (likely empty/destroyed)")
                     return True, enemy_core_target
 
                 self._log(
@@ -114,6 +138,12 @@ class Hound:
                 set_nav_target(bridge_target.x, bridge_target.y)
                 moved = execute_nav_step(ct)
                 post_pos = ct.get_position()
+                if (
+                    post_pos.x == bridge_target.x
+                    and post_pos.y == bridge_target.y
+                    and self._try_attack_underfoot_enemy_bridge(ct)
+                ):
+                    return True, enemy_core_target
                 self._log(
                     ct,
                     (
