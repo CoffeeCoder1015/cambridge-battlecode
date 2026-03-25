@@ -7,7 +7,7 @@ from ..Movement.TangentBug import TangentBug
 
 ORE_ENVS = (Environment.ORE_TITANIUM,)
 ACTION_RADIUS_SQ = 2
-BRIDGE_BUILDER_DEBUG_PRINTS = True
+BRIDGE_BUILDER_DEBUG_PRINTS = False
 CARDINAL_DIRECTIONS = (
     Direction.NORTH,
     Direction.EAST,
@@ -95,9 +95,9 @@ class BridgeBuilder:
                     ct, f"dropping ore target {self.ore_target} (no longer visible)"
                 )
                 self._clear_primary_ore_target()
-            elif self._ore_has_completed_extractor(ct, ore_pos) and not self._is_enemy_extractor(ct, ore_pos):
+            elif self._ore_has_completed_extractor(ct, ore_pos) and not self._is_orphaned_harvester(ct, ore_pos):
                 self._log(
-                    ct, f"dropping ore target {self.ore_target} (already harvested)"
+                    ct, f"dropping ore target {self.ore_target} (already connected to network)"
                 )
                 self._clear_primary_ore_target()
             else:
@@ -112,7 +112,8 @@ class BridgeBuilder:
 
         if self.ore_target is None:
             self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores)
-            self._log(ct, f"selected reachable ore target={self.ore_target}")
+            if self.ore_target is not None:
+                self._log(ct, f"selected reachable ore target={self.ore_target}")
 
         self._remember_secondary_ore(ct, my_pos, visible_ores)
 
@@ -204,19 +205,16 @@ class BridgeBuilder:
         for ox, oy in visible_ores:
             ore_pos = Position(ox, oy)
             if self._ore_has_completed_extractor(ct, ore_pos):
-                if not self._is_enemy_extractor(ct, ore_pos):
-                    self._log(
-                        ct,
-                        f"ore {(ox, oy)} rejected: friendly/unclaimed harvester/generator already present",
-                    )
+                if not self._is_orphaned_harvester(ct, ore_pos):
+                    # Harvester is already connected to our network
                     continue
-                self._log(ct, f"ore {(ox, oy)} accepted for STEALING: enemy harvester present")
-                is_stealing = True
+                self._log(ct, f"ore {(ox, oy)} accepted: orphaned harvester present (team={ct.get_team(ct.get_tile_building_id(ore_pos))})")
+                is_harvestable_or_stealable = True
             else:
-                is_stealing = False
+                is_harvestable_or_stealable = False
 
             blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
-            if blocking_type is not None and not is_stealing:
+            if blocking_type is not None and not is_harvestable_or_stealable:
                 self._log(
                     ct,
                     f"ore {(ox, oy)} rejected: blocked by non-road entity {blocking_type}",
@@ -407,6 +405,17 @@ class BridgeBuilder:
         generator_type = getattr(EntityType, "GENERATOR", None)
         return generator_type is not None and b_type == generator_type
 
+    def _is_orphaned_harvester(self, ct: Controller, ore_pos: Position) -> bool:
+        if not self._ore_has_completed_extractor(ct, ore_pos):
+            return False
+
+        # A harvester is orphaned if none of its cardinal neighbors are a friendly bridge/conveyor
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            adj_pos = Position(ore_pos.x + dx, ore_pos.y + dy)
+            if self._is_on_friendly_return_path(ct, adj_pos):
+                return False
+        return True
+
     @staticmethod
     def _ore_blocking_structure_type(ct: Controller, ore_pos: Position):
         if not ct.is_in_vision(ore_pos):
@@ -515,7 +524,7 @@ class BridgeBuilder:
 
         self._clear_underfoot_for_bridge(ct, start_pos)
 
-        if self._clear_bridge_target_obstruction(ct, target_pos):
+        if self._resolve_bridge_path_blocker(ct, target_pos):
             return True
 
         if ct.can_build_bridge(start_pos, target_pos):
@@ -710,9 +719,10 @@ class BridgeBuilder:
             return False
         return env == Environment.EMPTY
 
-    def _clear_bridge_target_obstruction(self, ct: Controller, target_pos: Position) -> bool:
+    def _resolve_bridge_path_blocker(self, ct: Controller, target_pos: Position) -> bool:
         """
-        Aggressive Stealing: If the path is blocked by enemy infrastructure, destroy it.
+        Passive Resolution: If the bridge path is blocked by enemy infrastructure, 
+        dismantle it to create a spot. Only targets enemy buildings.
         Note: Builders can only destroy within ACTION_RADIUS (dist_sq <= 2).
         """
         my_pos = ct.get_position()
@@ -723,7 +733,7 @@ class BridgeBuilder:
             dist_sq = (my_pos.x - target_pos.x)**2 + (my_pos.y - target_pos.y)**2
             if dist_sq <= 2 and ct.can_destroy(target_pos):
                 ct.destroy(target_pos)
-                self._log(ct, f"Attack Mode: Destroying primary bridge target obstruction at ({target_pos.x},{target_pos.y})")
+                self._log(ct, f"dismantling enemy obstruction at ({target_pos.x},{target_pos.y}) to clear bridge path")
                 return True
         
         # 2. If the primary target is farther away, but we're blocked by nearby enemy buildings
@@ -739,7 +749,7 @@ class BridgeBuilder:
                     if b_type in (EntityType.ROAD, EntityType.BRIDGE, EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
                         if ct.can_destroy(adj_pos):
                             ct.destroy(adj_pos)
-                            self._log(ct, f"Attack Mode: Destroying adjacent enemy {b_type} at ({adj_pos.x},{adj_pos.y}) to clear path")
+                            self._log(ct, f"dismantling adjacent enemy {b_type} at ({adj_pos.x},{adj_pos.y}) to clear path")
                             return True
         return False
 
