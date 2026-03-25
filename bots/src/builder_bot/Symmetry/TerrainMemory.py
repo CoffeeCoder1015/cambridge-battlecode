@@ -16,9 +16,15 @@ PropogateSymetry handles passing this information to the core.
 class SymmetryAnalyzer:
     MAGIC_MASK = 0x5A000000 
     
-    def __init__(self, ct, core_pos: tuple[int, int] | None = None):
+    def __init__(
+        self,
+        ct,
+        core_pos: tuple[int, int] | None = None,
+        debug_prints: bool = DEBUG_PRINTS,
+    ):
         self.w = ct.get_map_width()
         self.h = ct.get_map_height()
+        self.debug_prints = debug_prints
         if core_pos is None:
             cp = ct.get_position()
             self.my_core = (cp.x, cp.y)
@@ -50,14 +56,14 @@ class SymmetryAnalyzer:
         # center is within 1 tile of an axis, the footprint overlaps that band.
         if abs(core_x - cx) <= 1.0 and 101 in self.possible:
             self.possible.discard(101)
-            if DEBUG_PRINTS:
+            if self.debug_prints:
                 print(
                     f"[Bot {self.my_core}] Init: ruled out REF_X — 3x3 core overlaps vertical axis band",
                     file=sys.stderr,
                 )
         if abs(core_y - cy) <= 1.0 and 102 in self.possible:
             self.possible.discard(102)
-            if DEBUG_PRINTS:
+            if self.debug_prints:
                 print(
                     f"[Bot {self.my_core}] Init: ruled out REF_Y — 3x3 core overlaps horizontal axis band",
                     file=sys.stderr,
@@ -99,7 +105,7 @@ class SymmetryAnalyzer:
                         if (info_bits & 2): self.possible.discard(102)
                         if (info_bits & 4): self.possible.discard(103)
             except Exception as e:
-                if DEBUG_PRINTS:
+                if self.debug_prints:
                     print(f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] FAILED to read entity {m_id} - Error: {repr(e)}", file=sys.stderr)
                 continue
 
@@ -128,7 +134,7 @@ class SymmetryAnalyzer:
                     if m_pos in self.map_history and self.map_history[m_pos] != val:
                         invalidated.add(sym)
                         invalidated_mismatches[sym] = (pos, m_pos)
-                        if DEBUG_PRINTS:
+                        if self.debug_prints:
                             print(
                                 f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] "
                                 f"Ruled out {self.sym_names[sym]} — tile {pos} ({val.value}) "
@@ -141,7 +147,7 @@ class SymmetryAnalyzer:
         # 4. Finalize Solution
         if len(self.possible) == 1 and not self.solved_sym:
             self.solved_sym = list(self.possible)[0]
-            if DEBUG_PRINTS:
+            if self.debug_prints:
                 print(
                     f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] "
                     f"*** SYMMETRY SOLVED: {self.sym_names[self.solved_sym]} "
@@ -186,7 +192,7 @@ class SymmetryAnalyzer:
                     marker_val = self.MAGIC_MASK | my_knowledge_mask
                     ct.place_marker(target_tile, marker_val)
                     self.last_broadcasted_mask = my_knowledge_mask
-                    if DEBUG_PRINTS:
+                    if self.debug_prints:
                         eliminated_names = [
                             self.sym_names[s] for s in (101, 102, 103)
                             if s in ({101, 102, 103} - self.possible)

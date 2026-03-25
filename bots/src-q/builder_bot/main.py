@@ -42,7 +42,11 @@ class BuilderBot:
         self.core_pos = refresh_core_pos(ct, self.core_pos)
 
         if self.symmetry_analyzer is None:
-            self.symmetry_analyzer = SymmetryAnalyzer(ct, core_pos=self.core_pos)
+            self.symmetry_analyzer = SymmetryAnalyzer(
+                ct,
+                core_pos=self.core_pos,
+                debug_prints=DEBUG_PRINTS,
+            )
         elif self.core_pos is not None:
             self.symmetry_analyzer.update_core_pos(self.core_pos)
 
