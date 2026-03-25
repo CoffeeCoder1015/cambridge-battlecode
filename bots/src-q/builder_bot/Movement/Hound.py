@@ -1,6 +1,31 @@
+from cambc import Position
+from cambc import Environment
+import random
+from cambc import Direction
 import sys
 
 from cambc import Controller, EntityType
+
+
+DIRECTIONS = [
+    Direction.NORTH,
+    Direction.SOUTH,
+    Direction.EAST,
+    Direction.WEST,
+    Direction.NORTHEAST,
+    Direction.NORTHWEST,
+    Direction.SOUTHEAST,
+    Direction.SOUTHWEST,
+]
+
+
+# Build turret on the tile next to the harvester
+CARDINAL_DIRECTIONS = [
+    Direction.NORTH,
+    Direction.SOUTH,
+    Direction.EAST,
+    Direction.WEST,
+]
 
 
 class Hound:
@@ -82,7 +107,7 @@ class Hound:
         execute_nav_step,
     ) -> tuple[bool, tuple[int, int] | None]:
         # Priority 1: Attack or approach nearby enemy buildings
-        attack_acted = self.attack_sqr(ct, set_nav_target, execute_nav_step)
+        attack_acted = self.attack(ct, set_nav_target, execute_nav_step)
         if attack_acted:
             return True, enemy_core_target
 
@@ -95,38 +120,122 @@ class Hound:
         set_nav_target(*enemy_core_target)
         return execute_nav_step(ct), enemy_core_target
 
+    def attack(self, ct: Controller, set_nav_target, execute_nav_step):
+        nearby_buildings = ct.get_nearby_buildings()
+        current_position = ct.get_position()
+        nearby_enemy_buildings = [
+            (
+                ct.get_entity_type(b),
+                current_position.distance_squared(ct.get_position(b)),
+                b,
+            )
+            for b in nearby_buildings
+            if ct.get_team(b) != ct.get_team()
+        ]
+        nearby_enemy_buildings.sort(key=lambda x: x[1])
+
+        for target_type, _, target_id in nearby_enemy_buildings:
+            if target_type == EntityType.HARVESTER:
+                status, infra_id = self.observe_around_harvester(
+                    ct, ct.get_position(target_id)
+                )
+                if status == "attack":
+                    return self.attack_sqr(
+                        ct, set_nav_target, execute_nav_step, infra_id
+                    )
+                elif status == "build":
+                    return self.build_turret(
+                        ct, set_nav_target, execute_nav_step, target_id
+                    )
+                elif status == "skip":
+                    # All surround tiles blocked by un-removables/allies, move to next item
+                    continue
+            elif target_type != EntityType.CORE:
+                # Attack non-harvester/non-core buildings normally
+                return self.attack_sqr(ct, set_nav_target, execute_nav_step, target_id)
+        return False
+
+    def observe_around_harvester(self, ct: Controller, harvester_pos: Position):
+        """
+        Scan cardinal tiles around a harvester to decide action:
+        - "attack": found removable enemy infra (road, conveyor, bridge).
+        - "build": at least one empty tile exists for turret placement.
+        - "skip": all empty tiles are blocked by un-removables or ally buildings.
+        """
+        has_empty_tile = False
+
+        for direction in CARDINAL_DIRECTIONS:
+            tile_pos = harvester_pos.add(direction)
+            if not (
+                0 <= tile_pos.x < ct.get_map_width()
+                and 0 <= tile_pos.y < ct.get_map_height()
+            ):
+                continue
+
+            tile_env = ct.get_tile_env(tile_pos)
+            if tile_env != Environment.EMPTY:
+                continue
+
+            tile_building_id = ct.get_tile_building_id(tile_pos)
+            if tile_building_id is None:
+                # Truly empty and buildable
+                has_empty_tile = True
+                continue
+
+            # Building present
+            team = ct.get_team(tile_building_id)
+            building_type = ct.get_entity_type(tile_building_id)
+            if team != ct.get_team():
+                # Enemy building
+                if building_type in (
+                    EntityType.ROAD,
+                    EntityType.CONVEYOR,
+                    EntityType.BRIDGE,
+                ):
+                    return "attack", tile_building_id
+                # Other enemy buildings (turrets, cores) are un-removable for space-making
+            else:
+                # Ally building
+                if building_type == EntityType.ROAD:
+                    # Inconsequential ally tiles such as roads can be removed to make room
+                    return "attack", tile_building_id
+
+            # Ally buildings (harvesters, conveyors, turrets) or non-removable enemy buildings block the square
+
+        if has_empty_tile:
+            return "build", None
+
+        return "skip", None
+
+    def build_turret(
+        self, ct: Controller, set_nav_target, execute_nav_step, harvester_id
+    ):
+        harvester_pos = ct.get_position(harvester_id)
+
+        for direction in CARDINAL_DIRECTIONS:
+            turret_pos = harvester_pos.add(direction)
+            valid_build_directions = DIRECTIONS.copy()
+            valid_build_directions.remove(direction)
+            build_direction = random.choice(valid_build_directions)
+            if ct.can_build_sentinel(turret_pos, build_direction):
+                ct.build_sentinel(turret_pos, build_direction)
+                return True
+
+        # Too far away
+        # move towards harvester
+
+        ct.draw_indicator_line(ct.get_position(), harvester_pos, 255, 255, 0)
+        set_nav_target(harvester_pos.x, harvester_pos.y)
+        # Return True as we have decided on a target and acted (moving)
+        return execute_nav_step(ct)
+
     def attack_sqr(
         self,
         ct: Controller,
         set_nav_target,
         execute_nav_step,
+        target_id,
     ) -> bool:
-        nearby_buildings = ct.get_nearby_buildings()
-        nearby_enemy_buildings = [
-            b for b in nearby_buildings 
-            if ct.get_team(b) != ct.get_team() 
-            and ct.get_entity_type(b) not in (EntityType.CORE, EntityType.HARVESTER)
-        ]
-
-        if not nearby_enemy_buildings:
-            return False
-
-        current_position = ct.get_position()
-        
-        # Calculate (priority, -distance_sq, building_id) for each target.
-        # Negative distance ensures that closer buildings win ties in priority.
-        potential_targets = []
-        for b_id in nearby_enemy_buildings:
-            etype = ct.get_entity_type(b_id)
-            priority = self.PRIORITY_MAP.get(etype, 10)
-            dist_sq = current_position.distance_squared(ct.get_position(b_id))
-            potential_targets.append((priority, -dist_sq, b_id))
-
-        # Sort by priority desc, then distance asc (which is -dist_sq desc)
-        potential_targets.sort(reverse=True)
-
-        # Target the best building
-        target_id = potential_targets[0][2]
         b_pos = ct.get_position(target_id)
         my_pos = ct.get_position()
         etype = ct.get_entity_type(target_id)
