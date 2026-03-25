@@ -33,6 +33,8 @@ class BridgeBuilder:
         self._post_bridge_nav = TangentBug()
         self._fallback_nav_target: tuple[int, int] | None = None
         self._fallback_nav = TangentBug()
+        self._no_ore_explore_target: tuple[int, int] | None = None
+        self._no_ore_explore_nav = TangentBug()
 
     def main(
         self,
@@ -84,6 +86,11 @@ class BridgeBuilder:
 
         visible_ores = self._visible_ores_from_scan(ct, symmetry_analyzer)
         self._log(ct, f"visible ores in scan={len(visible_ores)} {sorted(visible_ores)}")
+        if visible_ores:
+            self._no_ore_explore_target = None
+        else:
+            self._log(ct, "no visible ore, using center-weighted exploration fallback")
+            return self._run_no_ore_exploration(ct)
 
         if self.ore_target is not None:
             if self.ore_target not in visible_ores:
@@ -902,6 +909,35 @@ class BridgeBuilder:
         self._fallback_nav_target = (tx, ty)
         self._fallback_nav.set_target(tx, ty)
         move_dir = self._fallback_nav.next_move(ct)
+        if move_dir is None:
+            return False
+        return self._road_then_move(ct, move_dir)
+
+    def _choose_center_weighted_target(self, ct: Controller) -> tuple[int, int]:
+        width = ct.get_map_width()
+        height = ct.get_map_height()
+        center_x = (width - 1) / 2
+        center_y = (height - 1) / 2
+        tx = int(round(random.triangular(0, width - 1, center_x)))
+        ty = int(round(random.triangular(0, height - 1, center_y)))
+        return tx, ty
+
+    def _run_no_ore_exploration(self, ct: Controller) -> bool:
+        if self._no_ore_explore_target is None:
+            tx, ty = self._choose_center_weighted_target(ct)
+            self._no_ore_explore_target = (tx, ty)
+            self._no_ore_explore_nav.set_target(tx, ty)
+
+        move_dir = self._no_ore_explore_nav.next_move(ct)
+        if move_dir is not None:
+            moved = self._road_then_move(ct, move_dir)
+            if moved:
+                return True
+
+        tx, ty = self._choose_center_weighted_target(ct)
+        self._no_ore_explore_target = (tx, ty)
+        self._no_ore_explore_nav.set_target(tx, ty)
+        move_dir = self._no_ore_explore_nav.next_move(ct)
         if move_dir is None:
             return False
         return self._road_then_move(ct, move_dir)
