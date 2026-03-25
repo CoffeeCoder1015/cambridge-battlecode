@@ -89,25 +89,21 @@ class BridgeBuilder:
         )
 
         if self.ore_target is not None:
+            ore_pos = Position(self.ore_target[0], self.ore_target[1])
             if self.ore_target not in visible_ores:
                 self._log(
                     ct, f"dropping ore target {self.ore_target} (no longer visible)"
                 )
                 self._clear_primary_ore_target()
-            elif self._ore_has_completed_extractor(
-                ct,
-                Position(self.ore_target[0], self.ore_target[1]),
-            ):
+            elif self._ore_has_completed_extractor(ct, ore_pos) and not self._is_enemy_extractor(ct, ore_pos):
                 self._log(
                     ct, f"dropping ore target {self.ore_target} (already harvested)"
                 )
                 self._clear_primary_ore_target()
             else:
-                blocking_type = self._ore_blocking_structure_type(
-                    ct,
-                    Position(self.ore_target[0], self.ore_target[1]),
-                )
-                if blocking_type is not None:
+                is_enemy_extractor = self._is_enemy_extractor(ct, ore_pos)
+                blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
+                if blocking_type is not None and not is_enemy_extractor:
                     self._log(
                         ct,
                         f"dropping ore target {self.ore_target} (blocked by {blocking_type})",
@@ -128,6 +124,14 @@ class BridgeBuilder:
 
         if self._in_action_radius(my_pos, ore_pos):
             self._log(ct, f"ore {self.ore_target} in action radius, trying build")
+            if self._is_enemy_extractor(ct, ore_pos):
+                self._log(
+                    ct, f"detected enemy extractor at {self.ore_target}, starting steal cycle"
+                )
+                self._clear_primary_ore_target()
+                self._start_post_build_alignment(ct, ore_pos)
+                return True
+
             built = self._build_generator_on_ore(ct, ore_pos)
             if built:
                 self._clear_primary_ore_target()
@@ -200,12 +204,19 @@ class BridgeBuilder:
         for ox, oy in visible_ores:
             ore_pos = Position(ox, oy)
             if self._ore_has_completed_extractor(ct, ore_pos):
-                self._log(
-                    ct, f"ore {(ox, oy)} rejected: harvester/generator already present"
-                )
-                continue
+                if not self._is_enemy_extractor(ct, ore_pos):
+                    self._log(
+                        ct,
+                        f"ore {(ox, oy)} rejected: friendly/unclaimed harvester/generator already present",
+                    )
+                    continue
+                self._log(ct, f"ore {(ox, oy)} accepted for STEALING: enemy harvester present")
+                is_stealing = True
+            else:
+                is_stealing = False
+
             blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
-            if blocking_type is not None:
+            if blocking_type is not None and not is_stealing:
                 self._log(
                     ct,
                     f"ore {(ox, oy)} rejected: blocked by non-road entity {blocking_type}",
@@ -371,6 +382,31 @@ class BridgeBuilder:
         generator_type = getattr(EntityType, "GENERATOR", None)
         return generator_type is not None and b_type == generator_type
 
+    def _is_enemy_extractor(self, ct: Controller, pos: Position) -> bool:
+        if not ct.is_in_vision(pos):
+            return False
+
+        try:
+            building_id = ct.get_tile_building_id(pos)
+        except Exception:
+            return False
+        if building_id is None:
+            return False
+
+        if ct.get_team(building_id) == ct.get_team():
+            return False
+
+        try:
+            b_type = ct.get_entity_type(building_id)
+        except Exception:
+            return False
+
+        if b_type == EntityType.HARVESTER:
+            return True
+
+        generator_type = getattr(EntityType, "GENERATOR", None)
+        return generator_type is not None and b_type == generator_type
+
     @staticmethod
     def _ore_blocking_structure_type(ct: Controller, ore_pos: Position):
         if not ct.is_in_vision(ore_pos):
@@ -478,6 +514,9 @@ class BridgeBuilder:
             return True
 
         self._clear_underfoot_for_bridge(ct, start_pos)
+
+        if self._clear_bridge_target_obstruction(ct, target_pos):
+            return True
 
         if ct.can_build_bridge(start_pos, target_pos):
             ct.build_bridge(start_pos, target_pos)
@@ -598,10 +637,25 @@ class BridgeBuilder:
         if not candidates:
             return None
 
-        def sort_key(pos: Position) -> tuple[int, int, int, int]:
+        # Sort candidates to prefer EMPTY tiles, then friendly infrastructure, then enemy infrastructure.
+        def sort_key(pos: Position) -> tuple[int, int, int, int, int]:
             core_dist_sq = (pos.x - core.x) ** 2 + (pos.y - core.y) ** 2
             start_dist_sq = (pos.x - start_pos.x) ** 2 + (pos.y - start_pos.y) ** 2
-            return (core_dist_sq, -start_dist_sq, pos.x, pos.y)
+            
+            # Tile preference score: 0 for empty, 1 for friendly road, 2 for enemy building
+            preference = 2
+            try:
+                env = ct.get_tile_env(pos)
+                if env == Environment.EMPTY:
+                    preference = 0
+                else:
+                    b_id = ct.get_tile_building_id(pos)
+                    if b_id is not None and ct.get_team(b_id) == ct.get_team():
+                        preference = 1
+            except Exception:
+                pass
+
+            return (preference, core_dist_sq, -start_dist_sq, pos.x, pos.y)
 
         candidates.sort(key=sort_key)
         for cand in candidates:
@@ -629,6 +683,16 @@ class BridgeBuilder:
 
         building_id = ct.get_tile_building_id(pos)
         if building_id is not None:
+            # Allow friendly infrastructure (always valid as start/end or can be overwritten)
+            if ct.get_team(building_id) == ct.get_team():
+                b_type = ct.get_entity_type(building_id)
+                return b_type in (
+                    EntityType.ROAD,
+                    EntityType.BRIDGE,
+                    EntityType.CONVEYOR,
+                    EntityType.ARMOURED_CONVEYOR,
+                )
+            # Allow enemy buildings ONLY IF they are conveyors, bridges, or roads (we can destroy them)
             b_type = ct.get_entity_type(building_id)
             return b_type in (
                 EntityType.ROAD,
@@ -645,6 +709,39 @@ class BridgeBuilder:
         except Exception:
             return False
         return env == Environment.EMPTY
+
+    def _clear_bridge_target_obstruction(self, ct: Controller, target_pos: Position) -> bool:
+        """
+        Aggressive Stealing: If the path is blocked by enemy infrastructure, destroy it.
+        Note: Builders can only destroy within ACTION_RADIUS (dist_sq <= 2).
+        """
+        my_pos = ct.get_position()
+        
+        # 1. Check if the primary target is an enemy building and reachable for destruction
+        b_id = ct.get_tile_building_id(target_pos)
+        if b_id is not None and ct.get_team(b_id) != ct.get_team():
+            dist_sq = (my_pos.x - target_pos.x)**2 + (my_pos.y - target_pos.y)**2
+            if dist_sq <= 2 and ct.can_destroy(target_pos):
+                ct.destroy(target_pos)
+                self._log(ct, f"Attack Mode: Destroying primary bridge target obstruction at ({target_pos.x},{target_pos.y})")
+                return True
+        
+        # 2. If the primary target is farther away, but we're blocked by nearby enemy buildings
+        # towards that target, clear the adjacent one first.
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                if dx == 0 and dy == 0:
+                    continue
+                adj_pos = Position(my_pos.x + dx, my_pos.y + dy)
+                adj_id = ct.get_tile_building_id(adj_pos)
+                if adj_id is not None and ct.get_team(adj_id) != ct.get_team():
+                    b_type = ct.get_entity_type(adj_id)
+                    if b_type in (EntityType.ROAD, EntityType.BRIDGE, EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
+                        if ct.can_destroy(adj_pos):
+                            ct.destroy(adj_pos)
+                            self._log(ct, f"Attack Mode: Destroying adjacent enemy {b_type} at ({adj_pos.x},{adj_pos.y}) to clear path")
+                            return True
+        return False
 
     def _clear_underfoot_for_bridge(self, ct: Controller, my_pos: Position) -> bool:
         building_id = ct.get_tile_building_id(my_pos)
@@ -905,8 +1002,6 @@ class BridgeBuilder:
 
     def _log(self, ct: Controller, message: str) -> None:
         if not self.debug_prints:
-            return
-        if ct.get_current_round() >= 100:
             return
         pos = ct.get_position()
         print(
