@@ -51,7 +51,7 @@ class BuilderBot:
             self.agentmode = "BRIDGE_BUILDER"
             self.agentrole = "Builder"
 
-        if ct.get_current_round() == 2:
+        if ct.get_current_round() == 400:
             self.agentmode = "BRIDGE_BUILDER"
             self.agentrole = "Builder"
 
