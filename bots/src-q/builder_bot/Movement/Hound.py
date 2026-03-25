@@ -1,9 +1,6 @@
-from cambc import Position
-from cambc import Environment
-from cambc import Direction
 import sys
 
-from cambc import Controller, EntityType
+from cambc import Controller, EntityType, Position, Environment, Direction
 
 
 DIRECTIONS = [
@@ -117,6 +114,7 @@ class Hound:
             if hound_target is None:
                 return False, enemy_core_target
             enemy_core_target = hound_target
+        
 
         set_nav_target(*enemy_core_target)
         return execute_nav_step(ct), enemy_core_target
@@ -124,6 +122,19 @@ class Hound:
     def attack(
         self, ct: Controller, set_nav_target, execute_nav_step, enemy_core_target
     ):
+        if enemy_core_target is not None:
+            core_position = Position(*enemy_core_target)
+            current_position = ct.get_position()
+            core_dir = current_position.direction_to(core_position)
+            core_position.add(core_dir.opposite())
+            dist = current_position.distance_squared(core_position)
+            if dist <= 32:
+                ct.draw_indicator_line(current_position,core_position,0,255,0)
+            elif dist <= 64:
+                ct.draw_indicator_line(current_position,core_position,255,255,0)
+            else:
+                ct.draw_indicator_line(current_position,core_position,255,0,0)
+
         nearby_buildings = ct.get_nearby_buildings()
         current_position = ct.get_position()
         nearby_enemy_buildings = [
@@ -138,98 +149,11 @@ class Hound:
         nearby_enemy_buildings.sort(key=lambda x: x[1])
 
         for target_type, _, target_id in nearby_enemy_buildings:
-            if target_type == EntityType.HARVESTER:
-                status, infra_id = self.observe_around_harvester(
-                    ct, ct.get_position(target_id)
-                )
-                if status == "attack":
-                    return self.attack_sqr(
-                        ct, set_nav_target, execute_nav_step, infra_id
-                    )
-                elif status == "build":
-                    return self.build_turret(
-                        ct,
-                        set_nav_target,
-                        execute_nav_step,
-                        target_id,
-                        enemy_core_target,
-                    )
-                elif status == "skip":
-                    # All surround tiles blocked by un-removables/allies, move to next item
-                    continue
-            elif target_type != EntityType.CORE:
+            if target_type != EntityType.CORE and target_type != EntityType.HARVESTER:
                 # Attack non-harvester/non-core buildings normally
                 return self.attack_sqr(ct, set_nav_target, execute_nav_step, target_id)
         return False
 
-    def observe_around_harvester(self, ct: Controller, harvester_pos: Position):
-        """
-        Scan cardinal tiles around a harvester to decide action:
-        - "attack": found removable infrastructure (enemy or ally road).
-        - "build": at least one empty tile exists for turret placement.
-        - "skip": already 2+ sentinels or all empty tiles are blocked.
-        """
-        has_empty_tile = False
-        ally_sentinel_count = 0
-        removable_infra_id = None
-
-        for direction in CARDINAL_DIRECTIONS:
-            tile_pos = harvester_pos.add(direction)
-            if not (
-                0 <= tile_pos.x < ct.get_map_width()
-                and 0 <= tile_pos.y < ct.get_map_height()
-            ):
-                continue
-
-            try:
-                tile_env = ct.get_tile_env(tile_pos)
-                if tile_env != Environment.EMPTY:
-                    continue
-
-                tile_building_id = ct.get_tile_building_id(tile_pos)
-                if tile_building_id is None:
-                    # Truly empty and buildable
-                    has_empty_tile = True
-                    continue
-
-                # Building present
-                team = ct.get_team(tile_building_id)
-                building_type = ct.get_entity_type(tile_building_id)
-                if team != ct.get_team():
-                    # Enemy building
-                    if building_type in (
-                        EntityType.ROAD,
-                        EntityType.CONVEYOR,
-                        EntityType.BRIDGE,
-                    ):
-                        removable_infra_id = tile_building_id
-                    # Other enemy buildings (turrets, cores) are un-removable for space-making
-                else:
-                    # Ally building
-                    if building_type == EntityType.SENTINEL:
-                        ally_sentinel_count += 1
-                    elif building_type == EntityType.ROAD:
-                        # Inconsequential ally tiles such as roads can be removed to make room
-                        removable_infra_id = tile_building_id
-            except Exception:
-                # Out of vision or other engine error, skip this tile
-                continue
-
-            # Ally harvesters or other buildings block the square
-
-        # PRIORITY GATE: If we already have enough sentinels, skip all building/clearing
-        if ally_sentinel_count >= 2:
-            return "skip", None
-
-        # Next: make room if needed
-        if removable_infra_id is not None:
-            return "attack", removable_infra_id
-
-        # Next: build if empty tile exists
-        if has_empty_tile:
-            return "build", None
-
-        return "skip", None
 
     def build_turret(
         self,
