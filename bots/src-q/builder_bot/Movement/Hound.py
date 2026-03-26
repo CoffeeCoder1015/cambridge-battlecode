@@ -1,3 +1,4 @@
+from collections import deque
 import sys
 
 from cambc import Controller, EntityType, Position, Environment, Direction
@@ -27,6 +28,7 @@ CARDINAL_DIRECTIONS = [
 class Hound:
     def __init__(self, debug_prints: bool = False):
         self.debug_prints = debug_prints
+        self.tita_source_cache = {}
 
     PRIORITY_MAP = {
         EntityType.BRIDGE: 70,
@@ -138,38 +140,62 @@ class Hound:
         if enemy_core_target is not None:
             core_position = Position(*enemy_core_target)
             current_position = ct.get_position()
-            core_dir = current_position.direction_to(core_position)
-            core_position.add(core_dir.opposite())
-            bot_dist = current_position.distance_squared(core_position)
             
             resource_sources = filter(lambda x: x[0] in (EntityType.HARVESTER, EntityType.BRIDGE,EntityType.CONVEYOR),nearby_enemy_buildings)
 
-            in_range_resource_tiles= {}
+            resource_flow_graph = {}
             for e_type,_,e_id in resource_sources:
                 e_pos = ct.get_position(e_id)
-                build_dist = e_pos.distance_squared(core_position)
                 if e_type == EntityType.HARVESTER:
                     for h_dirs in CARDINAL_DIRECTIONS:
-                        h_e_pos = e_pos.add(h_dirs)
-                        build_dist = h_e_pos.distance_squared(core_position)
-                        if build_dist <= 32:
-                            ct.draw_indicator_dot(h_e_pos,0,255,0)
-                        elif build_dist <= 64:
-                            ct.draw_indicator_dot(h_e_pos,255,255,0)
-                        else:
-                            ct.draw_indicator_dot(h_e_pos,255,0,0)
+                        harv_placement_pos = e_pos.add(h_dirs)
+                        target_pos = core_position.add(core_position.direction_to(harv_placement_pos))
+                        build_dist = harv_placement_pos.distance_squared(target_pos)
+                        
+                        targeting_direction = target_pos.direction_to(harv_placement_pos)
+                        not_obstructing_resource = targeting_direction != h_dirs
+                        # if build_dist <= 32 and not_obstructing_resource:
+                        #     ct.draw_indicator_line(target_pos,harv_placement_pos,0,255,0)
+                        # elif build_dist <= 64:
+                        #     ct.draw_indicator_line(target_pos,harv_placement_pos,255,255,0)
+                        # else:
+                        #     ct.draw_indicator_line(target_pos,harv_placement_pos,255,0,0)
 
                 else:
-                    if build_dist <= 32:
-                        ct.draw_indicator_dot(e_pos,0,255,0)
-                    elif build_dist <= 64:
-                        ct.draw_indicator_dot(e_pos,255,255,0)
-                    else:
-                        ct.draw_indicator_dot(e_pos,255,0,0)
+                    stored_stuff = ct.get_stored_resource(e_id)
+                    # Check if conveyor / bridge has had resources flow through it
+                    if stored_stuff:
+                        self.tita_source_cache[e_id] = ct.get_current_round() 
+                    target_pos = core_position.add(core_position.direction_to(e_pos))
+                    build_dist = e_pos.distance_squared(target_pos)
+                    # if build_dist <= 32 and self.tita_source_cache.get(e_id) is not None:
+                    #     ct.draw_indicator_line(target_pos,e_pos,0,255,0)
+                    # elif build_dist <= 64:
+                    #     ct.draw_indicator_line(target_pos,e_pos,255,255,0)
+                    # else:
+                    #     ct.draw_indicator_line(target_pos,e_pos,255,0,0)
                     if e_type == EntityType.BRIDGE:
                         bridge_target = ct.get_bridge_target(e_id)
                         bridge_source = ct.get_position(e_id)
-                        ct.draw_indicator_line(bridge_source,bridge_target,100,100,200)
+                        resource_flow_graph[bridge_source] = (bridge_target,build_dist,self.tita_source_cache.get(e_id,0),target_pos)
+                    elif e_type == EntityType.CONVEYOR:
+                        conveyor_dir = ct.get_direction(e_id)
+                        conveyor_source = ct.get_position(e_id)
+                        conveyor_target = conveyor_source.add(conveyor_dir)
+                        resource_flow_graph[conveyor_source] = (conveyor_target,build_dist,self.tita_source_cache.get(e_id,0),target_pos)
+            
+            for source,data in resource_flow_graph.items():
+                target,build_dist,last_seen_tita,target_pos = data
+                has_tita = ct.get_current_round()-last_seen_tita <= 2
+                if build_dist <= 32 and has_tita:
+                    ct.draw_indicator_line(source,target,0,255,0)
+                    ct.draw_indicator_line(source,target_pos,0,255,0)
+                elif build_dist <= 64:
+                    ct.draw_indicator_line(source,target,255,255,0)
+                else:
+                    ct.draw_indicator_line(source,target,255,0,0)
+
+
 
         
 
