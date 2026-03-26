@@ -122,36 +122,67 @@ class Hound:
     def attack(
         self, ct: Controller, set_nav_target, execute_nav_step, enemy_core_target
     ):
+        nearby_buildings = ct.get_nearby_buildings()
+        current_position = ct.get_position()
+        nearby_enemy_buildings = [
+            (
+                e_type,
+                current_position.distance_squared(ct.get_position(b)),
+                b,
+            )
+            for b in nearby_buildings
+            if ct.get_team(b) != ct.get_team() and ( e_type := ct.get_entity_type(b) ) != EntityType.CORE
+        ]
+        nearby_enemy_buildings.sort(key=lambda x: x[1])
+
         if enemy_core_target is not None:
             core_position = Position(*enemy_core_target)
             current_position = ct.get_position()
             core_dir = current_position.direction_to(core_position)
             core_position.add(core_dir.opposite())
-            dist = current_position.distance_squared(core_position)
-            if dist <= 32:
-                ct.draw_indicator_line(current_position,core_position,0,255,0)
-            elif dist <= 64:
-                ct.draw_indicator_line(current_position,core_position,255,255,0)
-            else:
-                ct.draw_indicator_line(current_position,core_position,255,0,0)
+            bot_dist = current_position.distance_squared(core_position)
+            
+            resource_sources = filter(lambda x: x[0] in (EntityType.HARVESTER, EntityType.BRIDGE,EntityType.CONVEYOR),nearby_enemy_buildings)
 
-        nearby_buildings = ct.get_nearby_buildings()
-        current_position = ct.get_position()
-        nearby_enemy_buildings = [
-            (
-                ct.get_entity_type(b),
-                current_position.distance_squared(ct.get_position(b)),
-                b,
-            )
-            for b in nearby_buildings
-            if ct.get_team(b) != ct.get_team()
-        ]
-        nearby_enemy_buildings.sort(key=lambda x: x[1])
+            in_range_resource_tiles= {}
+            for e_type,_,e_id in resource_sources:
+                e_pos = ct.get_position(e_id)
+                build_dist = e_pos.distance_squared(core_position)
+                if e_type == EntityType.HARVESTER:
+                    for h_dirs in CARDINAL_DIRECTIONS:
+                        h_e_pos = e_pos.add(h_dirs)
+                        build_dist = h_e_pos.distance_squared(core_position)
+                        if build_dist <= 32:
+                            ct.draw_indicator_dot(h_e_pos,0,255,0)
+                        elif build_dist <= 64:
+                            ct.draw_indicator_dot(h_e_pos,255,255,0)
+                        else:
+                            ct.draw_indicator_dot(h_e_pos,255,0,0)
 
-        for target_type, _, target_id in nearby_enemy_buildings:
-            if target_type != EntityType.CORE and target_type != EntityType.HARVESTER:
-                # Attack non-harvester/non-core buildings normally
-                return self.attack_sqr(ct, set_nav_target, execute_nav_step, target_id)
+                else:
+                    if build_dist <= 32:
+                        ct.draw_indicator_dot(e_pos,0,255,0)
+                    elif build_dist <= 64:
+                        ct.draw_indicator_dot(e_pos,255,255,0)
+                    else:
+                        ct.draw_indicator_dot(e_pos,255,0,0)
+                    if e_type == EntityType.BRIDGE:
+                        bridge_target = ct.get_bridge_target(e_id)
+                        bridge_source = ct.get_position(e_id)
+                        ct.draw_indicator_line(bridge_source,bridge_target,100,100,200)
+
+        
+
+        potential_targets = []
+        for b_type,b_dist,b_id in nearby_enemy_buildings:
+            priority = self.PRIORITY_MAP.get(b_type, 10)
+            potential_targets.append((priority, -b_dist, b_id))
+
+        # Sort by priority desc, then distance asc (which is -dist_sq desc)
+        potential_targets.sort(reverse=True)
+
+        if potential_targets:
+            return self.attack_sqr(ct, set_nav_target, execute_nav_step, potential_targets[0][2])
         return False
 
 
