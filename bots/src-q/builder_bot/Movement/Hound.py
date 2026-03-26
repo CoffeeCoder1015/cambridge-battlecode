@@ -314,7 +314,8 @@ class Hound:
         # === STEP 5: Fallback Attack Logic ===
         potential_targets = []
         for b_type, b_dist, b_id in nearby_buildings:
-            if ct.get_team(b_id) != ct.get_team():
+            b_target_pos = ct.get_position(b_id)
+            if ct.get_team(b_id) != ct.get_team() and (b_target_pos.x,b_target_pos.y) not in self.offensive_no_go:
                 priority = self.PRIORITY_MAP.get(b_type, 10)
                 potential_targets.append((priority, -b_dist, b_id))
 
