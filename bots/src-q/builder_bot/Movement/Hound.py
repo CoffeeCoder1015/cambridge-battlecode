@@ -126,22 +126,16 @@ class Hound:
     ):
         nearby_buildings = ct.get_nearby_buildings()
         current_position = ct.get_position()
-        nearby_enemy_buildings = [
-            (
-                e_type,
-                current_position.distance_squared(ct.get_position(b)),
-                b,
-            )
+        nearby_buildings = [ ( e_type, current_position.distance_squared(ct.get_position(b)), b,)
             for b in nearby_buildings
-            if ct.get_team(b) != ct.get_team() and ( e_type := ct.get_entity_type(b) ) != EntityType.CORE
+            if (e_type := ct.get_entity_type(b)) != EntityType.CORE
         ]
-        nearby_enemy_buildings.sort(key=lambda x: x[1])
+        nearby_buildings.sort(key=lambda x: x[1])
 
         if enemy_core_target is not None:
             core_position = Position(*enemy_core_target)
             current_position = ct.get_position()
-            
-            resource_sources = filter(lambda x: x[0] in (EntityType.HARVESTER, EntityType.BRIDGE,EntityType.CONVEYOR),nearby_enemy_buildings)
+            resource_sources = filter( lambda x: ( x[0] in (EntityType.HARVESTER, EntityType.BRIDGE, EntityType.CONVEYOR)), nearby_buildings,)
 
             resource_flow_graph = {}
             for e_type,_,e_id in resource_sources:
@@ -187,7 +181,6 @@ class Hound:
                             ct.draw_indicator_line(target_pos,harv_placement_pos,255,255,0)
                         else:
                             ct.draw_indicator_line(target_pos,harv_placement_pos,255,0,0)
-                        return False
                 else:
                     stored_stuff = ct.get_stored_resource(e_id)
                     # Check if conveyor / bridge has had resources flow through it
@@ -227,9 +220,10 @@ class Hound:
         
 
         potential_targets = []
-        for b_type,b_dist,b_id in nearby_enemy_buildings:
-            priority = self.PRIORITY_MAP.get(b_type, 10)
-            potential_targets.append((priority, -b_dist, b_id))
+        for b_type, b_dist, b_id in nearby_buildings:
+            if ct.get_team(b_id) != ct.get_team():
+                priority = self.PRIORITY_MAP.get(b_type, 10)
+                potential_targets.append((priority, -b_dist, b_id))
 
         # Sort by priority desc, then distance asc (which is -dist_sq desc)
         potential_targets.sort(reverse=True)
