@@ -1,7 +1,6 @@
-from collections import deque
 import sys
 
-from cambc import Controller, EntityType, Position, Environment, Direction
+from cambc import Controller, EntityType, Position, Direction
 
 
 DIRECTIONS = [
@@ -29,6 +28,10 @@ class Hound:
     def __init__(self, debug_prints: bool = False):
         self.debug_prints = debug_prints
         self.tita_source_cache = {}
+        self.offensive_target_pos: tuple[int, int] | None = None
+        self.offensive_no_go: dict[
+            tuple[int, int], int
+        ] = {}  # position -> round validated
 
     PRIORITY_MAP = {
         EntityType.BRIDGE: 70,
@@ -116,7 +119,6 @@ class Hound:
             if hound_target is None:
                 return False, enemy_core_target
             enemy_core_target = hound_target
-        
 
         set_nav_target(*enemy_core_target)
         return execute_nav_step(ct), enemy_core_target
@@ -126,7 +128,12 @@ class Hound:
     ):
         nearby_buildings = ct.get_nearby_buildings()
         current_position = ct.get_position()
-        nearby_buildings = [ ( e_type, current_position.distance_squared(ct.get_position(b)), b,)
+        nearby_buildings = [
+            (
+                e_type,
+                current_position.distance_squared(ct.get_position(b)),
+                b,
+            )
             for b in nearby_buildings
             if (e_type := ct.get_entity_type(b)) != EntityType.CORE
         ]
@@ -135,103 +142,185 @@ class Hound:
         if enemy_core_target is not None:
             core_position = Position(*enemy_core_target)
             current_position = ct.get_position()
-            resource_sources = filter( lambda x: ( x[0] in (EntityType.HARVESTER, EntityType.BRIDGE, EntityType.CONVEYOR)), nearby_buildings,)
+            resource_sources = list(
+                filter(
+                    lambda x: (
+                        x[0]
+                        in (
+                            EntityType.HARVESTER,
+                            EntityType.BRIDGE,
+                            EntityType.CONVEYOR,
+                        )
+                    ),
+                    nearby_buildings,
+                )
+            )
 
-            resource_flow_graph = {}
-            for e_type,_,e_id in resource_sources:
+            # === STEP 1: Visualizations (always run) ===
+            for e_type, _, e_id in resource_sources:
                 e_pos = ct.get_position(e_id)
                 if e_type == EntityType.HARVESTER:
                     for h_dirs in CARDINAL_DIRECTIONS:
                         harv_placement_pos = e_pos.add(h_dirs)
-                        target_pos = core_position.add(core_position.direction_to(harv_placement_pos))
+                        target_pos = core_position.add(
+                            core_position.direction_to(harv_placement_pos)
+                        )
                         build_dist = harv_placement_pos.distance_squared(target_pos)
-                        
-                        targeting_direction = harv_placement_pos.direction_to(target_pos)
-                        not_obstructing_resource = targeting_direction.opposite() != h_dirs
-                        
+                        not_obstructing_resource = (
+                            harv_placement_pos.direction_to(target_pos).opposite()
+                            != h_dirs
+                        )
                         if build_dist <= 32 and not_obstructing_resource:
-                            dist_to_placement = ct.get_position().distance_squared(harv_placement_pos)
-                            if dist_to_placement > 20:
-                                set_nav_target(harv_placement_pos.x, harv_placement_pos.y)
-                                if execute_nav_step(ct):
-                                    return True
-                            else:
-                                existing_building = ct.get_tile_building_id(harv_placement_pos)
-                                if existing_building is None:
-                                    set_nav_target(harv_placement_pos.x, harv_placement_pos.y)
-                                    if execute_nav_step(ct):
-                                        if ct.can_build_sentinel(harv_placement_pos,targeting_direction):
-                                            ct.build_sentinel(harv_placement_pos,targeting_direction)
-                                        return True
-                                elif ct.get_entity_type(existing_building) in (EntityType.CONVEYOR,EntityType.BRIDGE):
-                                    if ct.get_team(existing_building) == ct.get_team():
-                                        if ct.can_destroy(harv_placement_pos):
-                                            ct.destroy(harv_placement_pos)
-                                            if ct.can_build_sentinel(harv_placement_pos,targeting_direction):
-                                                ct.build_sentinel(harv_placement_pos,targeting_direction)
-                                            return True
-                                    if self.attack_sqr(ct,set_nav_target,execute_nav_step,existing_building):
-                                        if ct.can_build_sentinel(harv_placement_pos,targeting_direction):
-                                            ct.build_sentinel(harv_placement_pos,targeting_direction)
-                                        return True
-
-                        if build_dist <= 32 and not_obstructing_resource:
-                            ct.draw_indicator_line(target_pos,harv_placement_pos,0,255,0)
+                            ct.draw_indicator_line(
+                                target_pos, harv_placement_pos, 0, 255, 0
+                            )
                         elif build_dist <= 64:
-                            ct.draw_indicator_line(target_pos,harv_placement_pos,255,255,0)
+                            ct.draw_indicator_line(
+                                target_pos, harv_placement_pos, 255, 255, 0
+                            )
                         else:
-                            ct.draw_indicator_line(target_pos,harv_placement_pos,255,0,0)
-                else:
+                            ct.draw_indicator_line(
+                                target_pos, harv_placement_pos, 255, 0, 0
+                            )
+                elif (
+                    e_type in (EntityType.BRIDGE, EntityType.CONVEYOR)
+                    and ct.get_team(e_id) != ct.get_team()
+                ):
                     stored_stuff = ct.get_stored_resource(e_id)
-                    # Check if conveyor / bridge has had resources flow through it
                     if stored_stuff:
-                        self.tita_source_cache[e_id] = ct.get_current_round() 
+                        self.tita_source_cache[e_id] = ct.get_current_round()
                     target_pos = core_position.add(core_position.direction_to(e_pos))
                     build_dist = e_pos.distance_squared(target_pos)
-                    # if build_dist <= 32 and self.tita_source_cache.get(e_id) is not None:
-                    #     ct.draw_indicator_line(target_pos,e_pos,0,255,0)
-                    # elif build_dist <= 64:
-                    #     ct.draw_indicator_line(target_pos,e_pos,255,255,0)
-                    # else:
-                    #     ct.draw_indicator_line(target_pos,e_pos,255,0,0)
-                    if e_type == EntityType.BRIDGE:
-                        bridge_target = ct.get_bridge_target(e_id)
-                        bridge_source = ct.get_position(e_id)
-                        resource_flow_graph[bridge_source] = (bridge_target,build_dist,self.tita_source_cache.get(e_id,0),target_pos)
-                    elif e_type == EntityType.CONVEYOR:
-                        conveyor_dir = ct.get_direction(e_id)
-                        conveyor_source = ct.get_position(e_id)
-                        conveyor_target = conveyor_source.add(conveyor_dir)
-                        resource_flow_graph[conveyor_source] = (conveyor_target,build_dist,self.tita_source_cache.get(e_id,0),target_pos)
-            
-            for source,data in resource_flow_graph.items():
-                target,build_dist,last_seen_tita,target_pos = data
-                has_tita = ct.get_current_round()-last_seen_tita <= 2
-                if build_dist <= 32 and has_tita:
-                    ct.draw_indicator_line(source,target,0,255,0)
-                    ct.draw_indicator_line(source,target_pos,0,255,0)
-                elif build_dist <= 64:
-                    ct.draw_indicator_line(source,target,255,255,0)
+                    has_tita = (
+                        ct.get_current_round() - self.tita_source_cache.get(e_id, 0)
+                        <= 2
+                    )
+                    if build_dist <= 32 and has_tita:
+                        ct.draw_indicator_line(e_pos, target_pos, 0, 255, 0)
+                    elif build_dist <= 64:
+                        ct.draw_indicator_line(e_pos, target_pos, 255, 255, 0)
+                    else:
+                        ct.draw_indicator_line(e_pos, target_pos, 255, 0, 0)
+
+            # === STEP 2: Validate existing target ===
+            if self.offensive_target_pos is not None:
+                t_pos = Position(*self.offensive_target_pos)
+                existing_id = ct.get_tile_building_id(t_pos)
+                if (
+                    existing_id is not None
+                    and ct.get_entity_type(existing_id) == EntityType.SENTINEL
+                ):
+                    if ct.get_team(existing_id) == ct.get_team():
+                        self.offensive_target_pos = None
+
+            # === STEP 3: Target Acquisition (only if no target) ===
+            if self.offensive_target_pos is None:
+                for e_type, _, e_id in resource_sources:
+                    e_pos = ct.get_position(e_id)
+                    if e_type == EntityType.HARVESTER:
+                        for h_dirs in CARDINAL_DIRECTIONS:
+                            harv_placement_pos = e_pos.add(h_dirs)
+                            target_pos = core_position.add(
+                                core_position.direction_to(harv_placement_pos)
+                            )
+                            build_dist = harv_placement_pos.distance_squared(target_pos)
+                            not_obstructing_resource = (
+                                harv_placement_pos.direction_to(target_pos).opposite()
+                                != h_dirs
+                            )
+                            if build_dist <= 32 and not_obstructing_resource:
+                                self.offensive_target_pos = (
+                                    harv_placement_pos.x,
+                                    harv_placement_pos.y,
+                                )
+                                break
+                        if self.offensive_target_pos is not None:
+                            break
+                    elif (
+                        e_type in (EntityType.BRIDGE, EntityType.CONVEYOR)
+                        and ct.get_team(e_id) != ct.get_team()
+                    ):
+                        if (e_pos.x, e_pos.y) in self.offensive_no_go:
+                            continue
+                        target_pos = core_position.add(
+                            core_position.direction_to(e_pos)
+                        )
+                        build_dist = e_pos.distance_squared(target_pos)
+                        has_tita = (
+                            ct.get_current_round() - self.tita_source_cache.get(e_id, 0)
+                            <= 2
+                        )
+                        if build_dist <= 32 and has_tita:
+                            feeds, _ = self._pipeline_feeds_ally_sentinel(
+                                ct, e_id, e_type
+                            )
+                            if not feeds:
+                                self.offensive_target_pos = (e_pos.x, e_pos.y)
+                                break
+
+            # === STEP 4: Decoupled Execution ===
+            if self.offensive_target_pos is not None:
+                t_pos = Position(*self.offensive_target_pos)
+                existing_id = ct.get_tile_building_id(t_pos)
+
+                if (
+                    t_pos.distance_squared(ct.get_position())
+                    <= ct.get_vision_radius_sq()
+                    and existing_id is not None
+                ):
+                    e_type = ct.get_entity_type(existing_id)
+                    if e_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
+                        feeds, no_go_key = self._pipeline_feeds_ally_sentinel(
+                            ct, existing_id, e_type
+                        )
+                        if feeds:
+                            self.offensive_no_go[self.offensive_target_pos] = (
+                                ct.get_current_round()
+                            )
+                            self.offensive_target_pos = None
+                            return False
+
+                targeting_dir = t_pos.direction_to(core_position)
+
+                if ct.can_build_sentinel(t_pos, targeting_dir):
+                    ct.build_sentinel(t_pos, targeting_dir)
+                    self.offensive_target_pos = None
+                    return True
+                if existing_id is None:
+                    # Tile is empty (or out of vision). Move to it.
+                    set_nav_target(t_pos.x, t_pos.y)
+                    if execute_nav_step(ct):
+                        if ct.can_build_sentinel(t_pos, targeting_dir):
+                            ct.build_sentinel(t_pos, targeting_dir)
+                            self.offensive_target_pos = None
+                        return True
                 else:
-                    ct.draw_indicator_line(source,target,255,0,0)
+                    # Something is blocking the tile. Attack it to clear the way!
+                    if self.attack_sqr(
+                        ct, set_nav_target, execute_nav_step, existing_id
+                    ):
+                        # Attempt build immediately in case we destroyed it this tick
+                        if ct.can_build_sentinel(t_pos, targeting_dir):
+                            ct.build_sentinel(t_pos, targeting_dir)
+                            self.offensive_target_pos = None
+                            return True
+                        return False
+                return True  # Actively pursuing target, block fallback
 
-
-
-        
-
+        # === STEP 5: Fallback Attack Logic ===
         potential_targets = []
         for b_type, b_dist, b_id in nearby_buildings:
             if ct.get_team(b_id) != ct.get_team():
                 priority = self.PRIORITY_MAP.get(b_type, 10)
                 potential_targets.append((priority, -b_dist, b_id))
 
-        # Sort by priority desc, then distance asc (which is -dist_sq desc)
         potential_targets.sort(reverse=True)
 
         if potential_targets:
-            return self.attack_sqr(ct, set_nav_target, execute_nav_step, potential_targets[0][2])
+            return self.attack_sqr(
+                ct, set_nav_target, execute_nav_step, potential_targets[0][2]
+            )
         return False
-
 
     def build_turret(
         self,
@@ -335,3 +424,71 @@ class Hound:
         if blocked_dir == Direction.WEST:  # Harvester is West
             return Direction.NORTHWEST if dy < 0 else Direction.SOUTHWEST
         return blocked_dir
+
+    def _pipeline_feeds_ally_sentinel(
+        self,
+        ct: Controller,
+        building_id: int,
+        building_type: EntityType,
+        visited: set[int] | None = None,
+        depth: int = 0,
+    ) -> tuple[bool, tuple[int, int] | None]:
+        if depth > 20:
+            return (False, None)
+        if visited is None:
+            visited = set()
+        if building_id in visited:
+            return (False, None)
+        visited.add(building_id)
+
+        b_pos = ct.get_position(building_id)
+        my_team = ct.get_team()
+
+        cache_key = (b_pos.x, b_pos.y)
+        if cache_key in self.offensive_no_go:
+            return (True, cache_key)
+
+        if b_pos.distance_squared(ct.get_position()) > ct.get_vision_radius_sq():
+            return (False, None)
+
+        tile_building = ct.get_tile_building_id(b_pos)
+        if tile_building is not None:
+            if ct.get_entity_type(tile_building) == EntityType.SENTINEL:
+                if ct.get_team(tile_building) == my_team:
+                    self.offensive_no_go[cache_key] = ct.get_current_round()
+                    return (True, cache_key)
+
+        if building_type == EntityType.CONVEYOR:
+            conveyor_dir = ct.get_direction(building_id)
+            next_pos = b_pos.add(conveyor_dir)
+            next_building = ct.get_tile_building_id(next_pos)
+            if next_building is not None:
+                next_type = ct.get_entity_type(next_building)
+                if next_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
+                    return self._pipeline_feeds_ally_sentinel(
+                        ct, next_building, next_type, visited, depth + 1
+                    )
+                elif next_type == EntityType.SENTINEL:
+                    feeds = ct.get_team(next_building) == my_team
+                    if feeds:
+                        self.offensive_no_go[cache_key] = ct.get_current_round()
+                        return (True, cache_key)
+                    return (False, None)
+
+        elif building_type == EntityType.BRIDGE:
+            bridge_target_pos = ct.get_bridge_target(building_id)
+            next_building = ct.get_tile_building_id(bridge_target_pos)
+            if next_building is not None:
+                next_type = ct.get_entity_type(next_building)
+                if next_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
+                    return self._pipeline_feeds_ally_sentinel(
+                        ct, next_building, next_type, visited, depth + 1
+                    )
+                elif next_type == EntityType.SENTINEL:
+                    feeds = ct.get_team(next_building) == my_team
+                    if feeds:
+                        self.offensive_no_go[cache_key] = ct.get_current_round()
+                        return (True, cache_key)
+                    return (False, None)
+
+        return (False, None)
