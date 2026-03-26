@@ -448,9 +448,6 @@ class Hound:
         if cache_key in self.offensive_no_go:
             return (True, cache_key)
 
-        if b_pos.distance_squared(ct.get_position()) > ct.get_vision_radius_sq():
-            return (False, None)
-
         tile_building = ct.get_tile_building_id(b_pos)
         if tile_building is not None:
             if ct.get_entity_type(tile_building) == EntityType.SENTINEL:
@@ -461,34 +458,44 @@ class Hound:
         if building_type == EntityType.CONVEYOR:
             conveyor_dir = ct.get_direction(building_id)
             next_pos = b_pos.add(conveyor_dir)
-            next_building = ct.get_tile_building_id(next_pos)
-            if next_building is not None:
-                next_type = ct.get_entity_type(next_building)
-                if next_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
-                    return self._pipeline_feeds_ally_sentinel(
-                        ct, next_building, next_type, visited, depth + 1
-                    )
-                elif next_type == EntityType.SENTINEL:
-                    feeds = ct.get_team(next_building) == my_team
-                    if feeds:
-                        self.offensive_no_go[cache_key] = ct.get_current_round()
-                        return (True, cache_key)
-                    return (False, None)
+            if (
+                next_pos.distance_squared(ct.get_position())
+                <= ct.get_vision_radius_sq()
+            ):
+                next_building = ct.get_tile_building_id(next_pos)
+                if next_building is not None:
+                    next_type = ct.get_entity_type(next_building)
+                    if next_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
+                        return self._pipeline_feeds_ally_sentinel(
+                            ct, next_building, next_type, visited, depth + 1
+                        )
+                    elif next_type == EntityType.SENTINEL:
+                        feeds = ct.get_team(next_building) == my_team
+                        if feeds:
+                            self.offensive_no_go[cache_key] = ct.get_current_round()
+                            return (True, cache_key)
+                        return (False, None)
+            return (False, None)
 
         elif building_type == EntityType.BRIDGE:
             bridge_target_pos = ct.get_bridge_target(building_id)
-            next_building = ct.get_tile_building_id(bridge_target_pos)
-            if next_building is not None:
-                next_type = ct.get_entity_type(next_building)
-                if next_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
-                    return self._pipeline_feeds_ally_sentinel(
-                        ct, next_building, next_type, visited, depth + 1
-                    )
-                elif next_type == EntityType.SENTINEL:
-                    feeds = ct.get_team(next_building) == my_team
-                    if feeds:
-                        self.offensive_no_go[cache_key] = ct.get_current_round()
-                        return (True, cache_key)
-                    return (False, None)
+            if (
+                bridge_target_pos.distance_squared(ct.get_position())
+                <= ct.get_vision_radius_sq()
+            ):
+                next_building = ct.get_tile_building_id(bridge_target_pos)
+                if next_building is not None:
+                    next_type = ct.get_entity_type(next_building)
+                    if next_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
+                        return self._pipeline_feeds_ally_sentinel(
+                            ct, next_building, next_type, visited, depth + 1
+                        )
+                    elif next_type == EntityType.SENTINEL:
+                        feeds = ct.get_team(next_building) == my_team
+                        if feeds:
+                            self.offensive_no_go[cache_key] = ct.get_current_round()
+                            return (True, cache_key)
+                        return (False, None)
+            return (False, None)
 
         return (False, None)
