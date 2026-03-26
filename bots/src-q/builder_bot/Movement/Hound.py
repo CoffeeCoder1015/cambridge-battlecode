@@ -152,15 +152,35 @@ class Hound:
                         target_pos = core_position.add(core_position.direction_to(harv_placement_pos))
                         build_dist = harv_placement_pos.distance_squared(target_pos)
                         
-                        targeting_direction = target_pos.direction_to(harv_placement_pos)
-                        not_obstructing_resource = targeting_direction != h_dirs
+                        targeting_direction = harv_placement_pos.direction_to(target_pos)
+                        not_obstructing_resource = targeting_direction.opposite() != h_dirs
+                        
+                        if build_dist <= 32 and not_obstructing_resource:
+                            dist_to_placement = ct.get_position().distance_squared(harv_placement_pos)
+                            if dist_to_placement > 20:
+                                set_nav_target(harv_placement_pos.x, harv_placement_pos.y)
+                                if execute_nav_step(ct):
+                                    return True
+                            else:
+                                existing_building = ct.get_tile_building_id(harv_placement_pos)
+                                if existing_building is None:
+                                    set_nav_target(harv_placement_pos.x, harv_placement_pos.y)
+                                    if execute_nav_step(ct):
+                                        if ct.can_build_sentinel(harv_placement_pos,targeting_direction):
+                                            ct.build_sentinel(harv_placement_pos,targeting_direction)
+                                        return True
+                                elif ct.get_entity_type(existing_building) in (EntityType.CONVEYOR,EntityType.BRIDGE):
+                                    if self.attack_sqr(ct,set_nav_target,execute_nav_step,existing_building):
+                                        if ct.can_build_sentinel(harv_placement_pos,targeting_direction):
+                                            ct.build_sentinel(harv_placement_pos,targeting_direction)
+                                        return True
+
                         # if build_dist <= 32 and not_obstructing_resource:
                         #     ct.draw_indicator_line(target_pos,harv_placement_pos,0,255,0)
                         # elif build_dist <= 64:
                         #     ct.draw_indicator_line(target_pos,harv_placement_pos,255,255,0)
                         # else:
                         #     ct.draw_indicator_line(target_pos,harv_placement_pos,255,0,0)
-
                 else:
                     stored_stuff = ct.get_stored_resource(e_id)
                     # Check if conveyor / bridge has had resources flow through it
