@@ -1,4 +1,5 @@
 import sys
+from collections import deque
 
 from cambc import Controller, EntityType, Position, Direction
 
@@ -32,6 +33,8 @@ class Hound:
         self.offensive_no_go: dict[
             tuple[int, int], int
         ] = {}  # position -> round validated
+        self.titanium_history = deque(maxlen=10)
+        self.last_titanium = None
 
     PRIORITY_MAP = {
         EntityType.BRIDGE: 70,
@@ -95,6 +98,7 @@ class Hound:
                 ),
                 file=sys.stderr,
             )
+        print("I AM HOUND")
 
         return next_mode, hound_target
 
@@ -139,7 +143,7 @@ class Hound:
         ]
         nearby_buildings.sort(key=lambda x: x[1])
 
-        if enemy_core_target is not None:
+        if enemy_core_target is not None and self.can_afford_sentinel(ct):
             core_position = Position(*enemy_core_target)
             current_position = ct.get_position()
             resource_sources = list(
@@ -499,3 +503,25 @@ class Hound:
             return (False, None)
 
         return (False, None)
+
+    def can_afford_sentinel(self, ct: Controller) -> bool:
+        current_titanium = ct.get_global_resources()[0]
+        sentinel_cost = ct.get_sentinel_cost()[0]
+
+        if self.last_titanium is not None:
+            # Only track positive growth (income) to avoid being penalized by our own spending
+            delta = current_titanium - self.last_titanium
+            self.titanium_history.append(max(0, delta))
+        self.last_titanium = current_titanium
+
+        # 1. Current balance check
+        if current_titanium < sentinel_cost:
+            return False
+
+        # 2. Moving average income check (>= 1/4 Sentinel cost)
+        if self.titanium_history:
+            avg_income = sum(self.titanium_history) / len(self.titanium_history)
+            if avg_income < sentinel_cost / 10:
+                return False
+
+        return True
