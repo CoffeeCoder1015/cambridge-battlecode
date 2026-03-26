@@ -170,17 +170,24 @@ class Hound:
                                             ct.build_sentinel(harv_placement_pos,targeting_direction)
                                         return True
                                 elif ct.get_entity_type(existing_building) in (EntityType.CONVEYOR,EntityType.BRIDGE):
+                                    if ct.get_team(existing_building) == ct.get_team():
+                                        if ct.can_destroy(harv_placement_pos):
+                                            ct.destroy(harv_placement_pos)
+                                            if ct.can_build_sentinel(harv_placement_pos,targeting_direction):
+                                                ct.build_sentinel(harv_placement_pos,targeting_direction)
+                                            return True
                                     if self.attack_sqr(ct,set_nav_target,execute_nav_step,existing_building):
                                         if ct.can_build_sentinel(harv_placement_pos,targeting_direction):
                                             ct.build_sentinel(harv_placement_pos,targeting_direction)
                                         return True
 
-                        # if build_dist <= 32 and not_obstructing_resource:
-                        #     ct.draw_indicator_line(target_pos,harv_placement_pos,0,255,0)
-                        # elif build_dist <= 64:
-                        #     ct.draw_indicator_line(target_pos,harv_placement_pos,255,255,0)
-                        # else:
-                        #     ct.draw_indicator_line(target_pos,harv_placement_pos,255,0,0)
+                        if build_dist <= 32 and not_obstructing_resource:
+                            ct.draw_indicator_line(target_pos,harv_placement_pos,0,255,0)
+                        elif build_dist <= 64:
+                            ct.draw_indicator_line(target_pos,harv_placement_pos,255,255,0)
+                        else:
+                            ct.draw_indicator_line(target_pos,harv_placement_pos,255,0,0)
+                        return False
                 else:
                     stored_stuff = ct.get_stored_resource(e_id)
                     # Check if conveyor / bridge has had resources flow through it
