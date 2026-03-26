@@ -41,6 +41,8 @@ class Turret:
 
             if priority > 0:
                 target_pos = ct.get_position(e_id)
+                if etype == EntityType.CORE:
+                    target_pos = target_pos.add(target_pos.direction_to(my_pos))
                 dist_sq = my_pos.distance_squared(target_pos)
                 possible_targets.append((priority, dist_sq, target_pos))
 
