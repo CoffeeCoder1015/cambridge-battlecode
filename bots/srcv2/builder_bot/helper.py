@@ -2,6 +2,25 @@ from cambc import Controller, EntityType
 
 from .Symmetry.TerrainMemory import SymmetryAnalyzer
 
+
+def get_cost_affordability(
+    ct: Controller,
+    cost_getter_name: str,
+) -> tuple[bool, tuple[int, int], tuple[int, int]]:
+    available_resources = ct.get_global_resources()
+    cost_getter = getattr(ct, cost_getter_name, None)
+    if not callable(cost_getter):
+        # Backward compatibility for environments missing the getter.
+        return True, (0, 0), available_resources
+
+    required_cost = cost_getter()
+    affordable = (
+        available_resources[0] >= required_cost[0]
+        and available_resources[1] >= required_cost[1]
+    )
+    return affordable, required_cost, available_resources
+
+
 def refresh_core_pos(
     ct: Controller,
     current: tuple[int, int] | None,
