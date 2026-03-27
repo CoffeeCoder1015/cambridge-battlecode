@@ -65,6 +65,7 @@ class BuilderBot:
         """
 
         self.known_symmetry = self.symmetry_analyzer.update(ct)
+        self.nav.attach_terrain_memory(self.symmetry_analyzer.map_history)
 
         if self.role == "HOUND":
             self.agentmode, entered_hound_target = self.hound.try_enter_mode(

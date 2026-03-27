@@ -1,34 +1,42 @@
+"""
+Bug2-style navigator for builder bots with enhanced recovery and blacklisting.
+Adapted from srcv2 TangentNav with API compatibility for src-q.
+"""
+
 from collections import deque
-from cambc import Direction, Environment, EntityType, Position
-from typing import Optional
+
+from cambc import Controller, Direction, Environment, EntityType, Position
 
 _ALL_DIRS: tuple[Direction, ...] = tuple(d for d in Direction if d != Direction.CENTRE)
+_PASSABLE_BUILDINGS: tuple[EntityType, ...] = (
+    EntityType.ROAD,
+    EntityType.BRIDGE,
+    EntityType.CONVEYOR,
+    EntityType.ARMOURED_CONVEYOR,
+)
 
-# Pre-compute sorted-by-angle order once for all 8 base directions.
-# Maps Direction -> tuple of all 8 dirs ordered closest to farthest angle.
+
 def _build_sorted_cache() -> dict[Direction, tuple[Direction, ...]]:
     cache: dict[Direction, tuple[Direction, ...]] = {}
     for base in _ALL_DIRS:
         dirs = [base]
-        r, l = base, base
+        r, left = base, base
         for _ in range(3):
             r = r.rotate_right()
-            l = l.rotate_left()
+            left = left.rotate_left()
             dirs.append(r)
-            dirs.append(l)
+            dirs.append(left)
         dirs.append(base.opposite())
         cache[base] = tuple(dirs)
     return cache
 
-_SORTED_DIRS: dict[Direction, tuple[Direction, ...]] = _build_sorted_cache()
 
-# Pre-compute boundary probe order (right-hand and left-hand) for all base dirs.
 def _build_probe_cache() -> dict[tuple[Direction, bool], tuple[Direction, ...]]:
     cache: dict[tuple[Direction, bool], tuple[Direction, ...]] = {}
     for base in _ALL_DIRS:
-        for right_hand in (True, False):
+        for follow_right in (True, False):
             seq: list[Direction] = []
-            if right_hand:
+            if follow_right:
                 p = base.rotate_right().rotate_right()
                 for _ in range(8):
                     seq.append(p)
@@ -38,239 +46,358 @@ def _build_probe_cache() -> dict[tuple[Direction, bool], tuple[Direction, ...]]:
                 for _ in range(8):
                     seq.append(p)
                     p = p.rotate_right()
-            cache[(base, right_hand)] = tuple(seq)
+            cache[(base, follow_right)] = tuple(seq)
     return cache
 
+
+_SORTED_DIRS: dict[Direction, tuple[Direction, ...]] = _build_sorted_cache()
 _PROBE_DIRS: dict[tuple[Direction, bool], tuple[Direction, ...]] = _build_probe_cache()
 
 
 class TangentBug:
     """
-    Fast BugNav2 navigator for builder bots.
-
-    Strategy:
-      DIRECT  — pick the navigable direction closest in angle to the target,
-                deprioritising tiles visited in the last few turns so the bot
-                naturally avoids ping-pong loops without any detection overhead.
-      BOUNDARY — right-hand (or left-hand) wall following.  Exits as soon as
-                 any direction leads to a tile strictly closer to the target
-                 than the best distance seen so far during this episode.
-                 Loop detection: if the bot revisits a (tile, side) state it
-                 already traced this episode, flip to the other side once; if
-                 that also loops, hard-reset.
+    Bug2-style navigator with enhanced recovery, blacklisting, and path memory.
 
     Passability:
-      - WALL tiles block.
+      - WALL tiles block (hard block, state=2).
       - EMPTY / ORE are navigable (caller builds road).
       - ROAD, CONVEYOR, ARMOURED_CONVEYOR pass (any team).
       - Friendly CORE passes; enemy CORE blocks.
-      - Tiles occupied by another builder bot block.
-      - Diagonal corner-clipping is allowed (only target tile checked).
+      - Tiles occupied by another builder bot are soft blocks (state=1).
+      - Diagonal corner-clipping is allowed.
 
     Public API:
         nav = TangentBug()
+        nav.attach_terrain_memory(map_history)  # optional, for out-of-vision memory
         nav.set_target(tx, ty)
-        direction = nav.next_move(ct)   # call every turn; returns Direction|None
-        nav.reset()
+        direction = nav.next_move(ct)   # returns Direction|None
     """
 
-    _RECENT_WINDOW    = 8    # how many past positions to remember for oscillation avoidance
-    _MAX_BOUNDARY     = 200  # hard step cap before boundary gives up
-    _DIRECT_PENALTY   = 4    # how many extra positions in recent-history penalty
+    _RECENT_WINDOW = 8
+    _MAX_BOUNDARY_STEPS = 300
+    _NEAR_TRAIL_REPULSE_COST = 70
+    _DOUBLE_STEP_REPULSE_COST = 20_000
+    _RECENT_TILE_PENALTY = 32
+    _M_LINE_EPS = 2
 
     def __init__(self) -> None:
-        self.target: Optional[tuple[int, int]] = None
+        self.target: tuple[int, int] | None = None
+        self._start: tuple[int, int] | None = None
+        self._terrain: dict[tuple[int, int], Environment] | None = None
 
-        # Mode: "direct" or "boundary"
-        self._mode: str = "direct"
-
-        # Boundary state
-        self._boundary_dir: Optional[Direction] = None  # last travel direction on boundary
-        self._follow_right: bool = True
-        self._side_switched: bool = False
-        self._boundary_steps: int = 0
-        self._best_dist_sq: int = 0      # best dist² seen since entering boundary
+        self._mode = "direct"
+        self._wall_dir: Direction | None = None
+        self._follow_right = True
+        self._hit_pos: tuple[int, int] | None = None
+        self._hit_dist_sq = 0
+        self._side_switched = False
+        self._boundary_steps = 0
         self._boundary_seen: set[tuple[int, int, bool]] = set()
+        self._last_boundary_pos: tuple[int, int] | None = None
 
-        # Recent position history — used in direct mode to deprioritise backtracking
         self._recent: deque[tuple[int, int]] = deque(maxlen=self._RECENT_WINDOW)
+        self._blacklist: dict[tuple[int, int], int] = {}
+        self._visit_counts: dict[tuple[int, int], int] = {}
+        self._trail_repulse: dict[tuple[int, int], int] = {}
+        self._loop_repulse: dict[tuple[int, int], int] = {}
+        self._pcache: dict[tuple[int, int], int] = {}
 
-        # Per-turn tile passability cache (cleared each call)
-        self._pcache: dict[tuple[int, int], bool] = {}
-
-    # ------------------------------------------------------------------ #
-    # Public API                                                           #
-    # ------------------------------------------------------------------ #
+    def attach_terrain_memory(
+        self, map_history: dict[tuple[int, int], Environment] | None
+    ) -> None:
+        self._terrain = map_history
 
     def set_target(self, tx: int, ty: int) -> None:
+        if self.target == (tx, ty):
+            return
         self.target = (tx, ty)
-        self._reset()
+        self._reset(clear_run_memory=True)
 
     def reset(self) -> None:
         self.target = None
-        self._reset()
+        self._reset(clear_run_memory=True)
 
-    def next_move(self, ct) -> Optional[Direction]:
-        """Return the next Direction to move, or None if at target / unreachable."""
+    def next_move(self, ct: Controller) -> Direction | None:
         if self.target is None:
             return None
 
         self._pcache.clear()
-        cur: Position = ct.get_position()
+        cur = ct.get_position()
         tx, ty = self.target
+
+        if self._start is None:
+            self._start = (cur.x, cur.y)
+
         if cur.x == tx and cur.y == ty:
+            self._reset(clear_run_memory=True)
             return None
 
-        self._recent.append((cur.x, cur.y))
+        coords = (cur.x, cur.y)
+        if not self._recent or self._recent[-1] != coords:
+            self._recent.append(coords)
+            self._record_step(coords)
+
+        curr_round = ct.get_current_round()
+        self._blacklist = {k: v for k, v in self._blacklist.items() if v > curr_round}
+
         target_pos = Position(tx, ty)
 
         if self._mode == "direct":
-            return self._direct(ct, cur, target_pos)
-        return self._boundary(ct, cur, target_pos)
+            return self._direct_step(ct, cur, target_pos)
+        return self._boundary_step(ct, cur, target_pos)
 
-    # ------------------------------------------------------------------ #
-    # Internal                                                             #
-    # ------------------------------------------------------------------ #
-
-    def _reset(self) -> None:
+    def _reset(self, *, clear_run_memory: bool = False) -> None:
         self._mode = "direct"
-        self._boundary_dir = None
+        self._wall_dir = None
         self._follow_right = True
+        self._hit_pos = None
+        self._hit_dist_sq = 0
         self._side_switched = False
         self._boundary_steps = 0
-        self._best_dist_sq = 0
         self._boundary_seen.clear()
+        self._last_boundary_pos = None
         self._recent.clear()
+        if clear_run_memory:
+            self._visit_counts.clear()
+            self._trail_repulse.clear()
+            self._loop_repulse.clear()
 
-    # ·· Direct mode ·····················································
+    def _record_step(self, coords: tuple[int, int]) -> None:
+        cx, cy = coords
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                region = (cx + dx, cy + dy)
+                weight = 2 if dx == 0 and dy == 0 else 1
+                self._trail_repulse[region] = (
+                    self._trail_repulse.get(region, 0) + weight
+                )
 
-    def _direct(self, ct, cur: Position, target_pos: Position) -> Optional[Direction]:
-        best_dir = cur.direction_to(target_pos)
+        count = self._visit_counts.get(coords, 0) + 1
+        self._visit_counts[coords] = count
+        if count == 2:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    region = (cx + dx, cy + dy)
+                    self._loop_repulse[region] = self._loop_repulse.get(region, 0) + 1
+
+    def _movement_score(self, nxt: Position, target: Position) -> int:
+        coords = (nxt.x, nxt.y)
+        score = nxt.distance_squared(target)
+        score += self._trail_repulse.get(coords, 0) * self._NEAR_TRAIL_REPULSE_COST
+        score += self._loop_repulse.get(coords, 0) * self._DOUBLE_STEP_REPULSE_COST
+        if coords in self._recent:
+            score += self._RECENT_TILE_PENALTY
+        return score
+
+    def _is_on_m_line(self, x: int, y: int) -> bool:
+        if self._start is None or self.target is None:
+            return True
+        sx, sy = self._start
+        tx, ty = self.target
+        dx, dy = tx - sx, ty - sy
+        length_sq = dx * dx + dy * dy
+        if length_sq == 0:
+            return True
+        cross_sq = (dy * x - dx * y + tx * sy - ty * sx) ** 2
+        return cross_sq <= self._M_LINE_EPS * self._M_LINE_EPS * length_sq
+
+    def _direct_step(
+        self, ct: Controller, cur: Position, target: Position
+    ) -> Direction | None:
+        best_dir = cur.direction_to(target)
         dirs = _SORTED_DIRS[best_dir]
-        recent = self._recent
+        cur_dist_sq = cur.distance_squared(target)
+        best_fresh: Direction | None = None
+        best_fresh_score = 10**12
+        best_progress: Direction | None = None
+        best_progress_score = 10**12
 
-        # Pass 1: prefer moves not in recent history
-        for d in dirs:
+        for i, d in enumerate(dirs):
             nxt = cur.add(d)
-            if self._ok(ct, nxt) and (nxt.x, nxt.y) not in recent:
-                return d
+            nxt_coords = (nxt.x, nxt.y)
+            if self._tile_state(ct, nxt) != 0 or nxt_coords in self._blacklist:
+                continue
+            if nxt.distance_squared(target) >= cur_dist_sq:
+                continue
+            score = self._movement_score(nxt, target) + i
+            if nxt_coords not in self._recent and score < best_fresh_score:
+                best_fresh = d
+                best_fresh_score = score
+            if score < best_progress_score:
+                best_progress = d
+                best_progress_score = score
 
-        # Pass 2: allow recent tiles if no fresh option exists
-        for d in dirs:
-            nxt = cur.add(d)
-            if self._ok(ct, nxt):
-                return d
+        if best_fresh is not None:
+            return best_fresh
+        if best_progress is not None:
+            return best_progress
 
-        # All directions blocked — start boundary following
-        self._enter_boundary(cur, target_pos, cur.direction_to(target_pos))
-        return self._boundary(ct, cur, target_pos)
+        ideal_state = self._tile_state(ct, cur.add(best_dir))
+        if ideal_state == 1:
+            return None
 
-    # ·· Boundary mode ····················································
+        self._enter_boundary(ct, cur, target, best_dir)
+        return self._boundary_step(ct, cur, target)
 
     def _enter_boundary(
-        self, cur: Position, target_pos: Position, blocked_dir: Direction
+        self,
+        ct: Controller,
+        cur: Position,
+        target: Position,
+        blocked_dir: Direction,
     ) -> None:
         self._mode = "boundary"
-        self._boundary_dir = blocked_dir
-        self._follow_right = True
+        self._wall_dir = blocked_dir
+        self._hit_pos = (cur.x, cur.y)
+        self._hit_dist_sq = cur.distance_squared(target)
         self._side_switched = False
         self._boundary_steps = 0
-        self._best_dist_sq = cur.distance_squared(target_pos)
         self._boundary_seen.clear()
+        self._last_boundary_pos = None
+        self._follow_right = self._pick_side(ct, cur, target, blocked_dir)
 
-    def _boundary(self, ct, cur: Position, target_pos: Position) -> Optional[Direction]:
-        # Loop detection
-        state = (cur.x, cur.y, self._follow_right)
-        if state in self._boundary_seen:
-            return self._stall_recovery(ct, cur, target_pos)
-        self._boundary_seen.add(state)
+    def _pick_side(
+        self,
+        ct: Controller,
+        cur: Position,
+        target: Position,
+        blocked: Direction,
+    ) -> bool:
+        right_d = next(
+            (
+                d
+                for d in _PROBE_DIRS[(blocked, True)]
+                if self._tile_state(ct, cur.add(d)) == 0
+            ),
+            None,
+        )
+        left_d = next(
+            (
+                d
+                for d in _PROBE_DIRS[(blocked, False)]
+                if self._tile_state(ct, cur.add(d)) == 0
+            ),
+            None,
+        )
+        if right_d is None:
+            return False
+        if left_d is None:
+            return True
+        right_score = self._movement_score(cur.add(right_d), target)
+        left_score = self._movement_score(cur.add(left_d), target)
+        return right_score <= left_score
 
-        self._boundary_steps += 1
-        if self._boundary_steps > self._MAX_BOUNDARY:
-            return self._stall_recovery(ct, cur, target_pos)
+    def _boundary_step(
+        self, ct: Controller, cur: Position, target: Position
+    ) -> Direction | None:
+        coords = (cur.x, cur.y)
 
-        # Update best distance seen during this episode
-        cur_d = cur.distance_squared(target_pos)
-        if cur_d < self._best_dist_sq:
-            self._best_dist_sq = cur_d
+        if coords != self._last_boundary_pos:
+            key = (cur.x, cur.y, self._follow_right)
+            if key in self._boundary_seen:
+                return self._recover(ct, cur, target)
+            self._boundary_seen.add(key)
+            self._boundary_steps += 1
+            self._last_boundary_pos = coords
 
-        # Escape check: can we step somewhere strictly closer than best so far?
-        best_dir = cur.direction_to(target_pos)
-        for d in _SORTED_DIRS[best_dir]:
+        if self._boundary_steps > self._MAX_BOUNDARY_STEPS:
+            return self._recover(ct, cur, target)
+
+        curr_dist_sq = cur.distance_squared(target)
+        if (
+            coords != self._hit_pos
+            and curr_dist_sq < self._hit_dist_sq
+            and self._is_on_m_line(cur.x, cur.y)
+        ):
+            self._mode = "direct"
+            return self._direct_step(ct, cur, target)
+
+        base = (
+            self._wall_dir if self._wall_dir is not None else cur.direction_to(target)
+        )
+        saw_soft = False
+        best_dir: Direction | None = None
+        best_score = 10**12
+        for i, d in enumerate(_PROBE_DIRS[(base, self._follow_right)]):
             nxt = cur.add(d)
-            if self._ok(ct, nxt) and nxt.distance_squared(target_pos) < self._best_dist_sq:
-                self._mode = "direct"
-                return d
+            state = self._tile_state(ct, nxt)
+            if state == 0:
+                score = self._movement_score(nxt, target) + i
+                if score < best_score:
+                    best_score = score
+                    best_dir = d
+            if state == 1:
+                saw_soft = True
 
-        # Wall-following step
-        base = self._boundary_dir if self._boundary_dir is not None else best_dir
-        for probe in _PROBE_DIRS[(base, self._follow_right)]:
-            nxt = cur.add(probe)
-            if self._ok(ct, nxt):
-                self._boundary_dir = probe
-                return probe
+        if best_dir is not None:
+            self._wall_dir = best_dir
+            return best_dir
+        if saw_soft:
+            return None
+        return self._recover(ct, cur, target)
 
-        return self._stall_recovery(ct, cur, target_pos)
-
-    def _stall_recovery(self, ct, cur: Position, target_pos: Position) -> Optional[Direction]:
-        # Try flipping the follow side once
+    def _recover(
+        self, ct: Controller, cur: Position, target: Position
+    ) -> Direction | None:
         if not self._side_switched:
             self._follow_right = not self._follow_right
             self._side_switched = True
             self._boundary_steps = 0
             self._boundary_seen.clear()
-            # Attempt one boundary step with the new side immediately
-            base = self._boundary_dir if self._boundary_dir is not None else cur.direction_to(target_pos)
-            for probe in _PROBE_DIRS[(base, self._follow_right)]:
-                nxt = cur.add(probe)
-                if self._ok(ct, nxt):
-                    self._boundary_dir = probe
-                    return probe
+            self._hit_pos = (cur.x, cur.y)
+            self._hit_dist_sq = cur.distance_squared(target)
 
-        # Hard reset — obstacle may fully enclose the bot or the path is dynamic.
-        # Fall back to any navigable move toward target (ignoring recent history).
+            base = (
+                self._wall_dir
+                if self._wall_dir is not None
+                else cur.direction_to(target)
+            )
+            for d in _PROBE_DIRS[(base, self._follow_right)]:
+                if self._tile_state(ct, cur.add(d)) == 0:
+                    self._wall_dir = d
+                    return d
+
+        self._blacklist[(cur.x, cur.y)] = ct.get_current_round() + 10
         self._reset()
-        best_dir = cur.direction_to(target_pos)
-        for d in _SORTED_DIRS[best_dir]:
-            nxt = cur.add(d)
-            if self._ok(ct, nxt):
+        best = cur.direction_to(target)
+        for d in _SORTED_DIRS[best]:
+            if self._tile_state(ct, cur.add(d)) == 0:
                 return d
         return None
 
-    # ·· Passability ··················································
-
-    def _ok(self, ct, pos: Position) -> bool:
+    def _tile_state(self, ct: Controller, pos: Position) -> int:
         key = (pos.x, pos.y)
-        v = self._pcache.get(key)
-        if v is not None:
-            return v
+        cached = self._pcache.get(key)
+        if cached is not None:
+            return cached
+        result = self._compute_state(ct, pos, key)
+        self._pcache[key] = result
+        return result
 
-        ok: bool
-        w = ct.get_map_width()
-        h = ct.get_map_height()
+    def _compute_state(
+        self, ct: Controller, pos: Position, key: tuple[int, int]
+    ) -> int:
+        w, h = ct.get_map_width(), ct.get_map_height()
         if not (0 <= pos.x < w and 0 <= pos.y < h):
-            ok = False
-        elif not ct.is_in_vision(pos):
-            ok = False
-        elif ct.get_tile_env(pos) == Environment.WALL:
-            ok = False
-        else:
-            bid = ct.get_tile_building_id(pos)
-            if bid is not None:
-                et = ct.get_entity_type(bid)
-                if et in (
-                    EntityType.ROAD,
-                    EntityType.BRIDGE,
-                    EntityType.CONVEYOR,
-                    EntityType.ARMOURED_CONVEYOR,
-                ):
-                    ok = True
-                elif et == EntityType.CORE:
-                    ok = ct.get_team(bid) == ct.get_team()
-                else:
-                    ok = False
-            else:
-                ok = ct.get_tile_builder_bot_id(pos) is None
+            return 2
+        if self._terrain is not None and self._terrain.get(key) == Environment.WALL:
+            return 2
+        if not ct.is_in_vision(pos):
+            return 0
 
-        self._pcache[key] = ok
-        return ok
+        env = ct.get_tile_env(pos)
+        if self._terrain is not None:
+            self._terrain[key] = env
+        if env == Environment.WALL:
+            return 2
+
+        bid = ct.get_tile_building_id(pos)
+        if bid is not None:
+            etype = ct.get_entity_type(bid)
+            own_core = etype == EntityType.CORE and ct.get_team(bid) == ct.get_team()
+            if not own_core and etype not in _PASSABLE_BUILDINGS:
+                return 2
+
+        if ct.get_tile_builder_bot_id(pos) is not None:
+            return 1
+        return 0
