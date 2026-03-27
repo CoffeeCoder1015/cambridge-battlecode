@@ -58,6 +58,7 @@ class TangentNav:
     _RECENT_WINDOW = 8
     _MAX_BOUNDARY_STEPS = 300
     _DEBUG_MAX_ROUND = 300
+    _NEAR_TRAIL_REPULSE_COST = 18
     _DOUBLE_STEP_REPULSE_COST = 20_000
     _RECENT_TILE_PENALTY = 32
     # Reduced epsilon to prevent premature M-line exits in tight corridors
@@ -82,6 +83,7 @@ class TangentNav:
         # Prevents re-entering the same trap immediately after a reset
         self._blacklist: dict[tuple[int, int], int] = {}
         self._visit_counts: dict[tuple[int, int], int] = {}
+        self._trail_repulse: dict[tuple[int, int], int] = {}
         self._loop_repulse: dict[tuple[int, int], int] = {}
         self._pcache: dict[tuple[int, int], int] = {}
 
@@ -106,6 +108,8 @@ class TangentNav:
         tx, ty = self.target
 
         if cur.x == tx and cur.y == ty:
+            # Target run is complete; clear per-run memory so the next path run starts fresh.
+            self._reset(clear_run_memory=True)
             return None
 
         coords = (cur.x, cur.y)
@@ -136,13 +140,21 @@ class TangentNav:
         self._recent.clear()
         if clear_run_memory:
             self._visit_counts.clear()
+            self._trail_repulse.clear()
             self._loop_repulse.clear()
 
     def _record_step(self, coords: tuple[int, int]) -> None:
+        cx, cy = coords
+        # Minor repulsion on the walked path and its neighboring 3x3 region.
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                region = (cx + dx, cy + dy)
+                weight = 2 if dx == 0 and dy == 0 else 1
+                self._trail_repulse[region] = self._trail_repulse.get(region, 0) + weight
+
         count = self._visit_counts.get(coords, 0) + 1
         self._visit_counts[coords] = count
         if count == 2:
-            cx, cy = coords
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     region = (cx + dx, cy + dy)
@@ -151,6 +163,7 @@ class TangentNav:
     def _movement_score(self, nxt: Position, target: Position) -> int:
         coords = (nxt.x, nxt.y)
         score = nxt.distance_squared(target)
+        score += self._trail_repulse.get(coords, 0) * self._NEAR_TRAIL_REPULSE_COST
         score += self._loop_repulse.get(coords, 0) * self._DOUBLE_STEP_REPULSE_COST
         if coords in self._recent:
             score += self._RECENT_TILE_PENALTY
