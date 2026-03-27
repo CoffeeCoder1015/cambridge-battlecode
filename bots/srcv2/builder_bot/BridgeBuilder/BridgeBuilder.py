@@ -1,3 +1,4 @@
+import sys
 from typing import Any, Literal
 
 from cambc import Controller, Direction, EntityType, Environment, Position
@@ -13,19 +14,39 @@ _PASSABLE_BUILDINGS = (
     EntityType.CONVEYOR,
     EntityType.ARMOURED_CONVEYOR,
 )
+_CARDINAL_DIRECTIONS = (
+    Direction.NORTH,
+    Direction.EAST,
+    Direction.SOUTH,
+    Direction.WEST,
+)
+_ORE_TARGET_BLACKLIST_ROUNDS = 80
 
 Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
 
 class BridgeBuilder:
+    # Master toggle for high-detail BridgeBuilder navigation logs.
+    _NAV_DEBUG = True
+    # Feature flag: when enabled, only the target unit id emits logs.
+    _NAV_DEBUG_ONLY_TARGET_ID = True
+    _NAV_DEBUG_TARGET_UNIT_ID = 3
+    _NAV_DEBUG_START_ROUND = 600
+    _NAV_DEBUG_END_ROUND = 700
+
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
         self.agent_phase: Phase = "SEEK_ORE"
+        self._post_build_align_ore_target: tuple[int, int] | None = None
         self._ore_nav = TangentNav()
         self._ore_nav_target: tuple[int, int] | None = None
         self._return_nav = TangentNav()
         self._return_nav_target: tuple[int, int] | None = None
         self._post_bridge_target: tuple[int, int] | None = None
+        self._diag_align_nav = TangentNav()
+        self._diag_align_nav_target: tuple[int, int] | None = None
+        self._diag_align_ore_target: tuple[int, int] | None = None
+        self._ore_blacklist: dict[tuple[int, int], int] = {}
 
     def run(
         self,
@@ -33,38 +54,87 @@ class BridgeBuilder:
         core_pos: tuple[int, int] | None,
         symmetry_analyzer: Any | None,
     ) -> bool:
+        my_pos = ct.get_position()
+        self._nav_dbg(
+            ct,
+            (
+                f"Tick phase={self.agent_phase} pos=({my_pos.x},{my_pos.y}) "
+                f"ore_target={self.ore_target} ore_nav_target={self._ore_nav_target} "
+                f"return_nav_target={self._return_nav_target} "
+                f"post_bridge_target={self._post_bridge_target} "
+                f"diag_align_target={self._diag_align_nav_target} "
+                f"ore_blacklist={len(self._ore_blacklist)}"
+            ),
+        )
         map_history = getattr(symmetry_analyzer, "map_history", None)
         if isinstance(map_history, dict):
             self._ore_nav.attach_terrain_memory(map_history)
             self._return_nav.attach_terrain_memory(map_history)
+            self._diag_align_nav.attach_terrain_memory(map_history)
+        self._cleanup_ore_blacklist(ct)
 
         if self.agent_phase == "RETURN_CORE":
             return self._run_return_core(ct, core_pos)
 
-        my_pos = ct.get_position()
+        if self._post_build_align_ore_target is not None:
+            return self._run_post_build_cardinal_alignment(ct)
+
         visible_ores = self._visible_ores_from_scan(ct, symmetry_analyzer)
+        self._nav_dbg(
+            ct,
+            f"Visible ore count={len(visible_ores)} core_pos={core_pos}",
+        )
 
         if self.ore_target is not None:
-            ore_pos = Position(self.ore_target[0], self.ore_target[1])
-            if (
-                self.ore_target not in visible_ores
-                or self._ore_has_completed_extractor(ct, ore_pos)
-                or self._ore_blocking_structure_type(ct, ore_pos) is not None
-            ):
+            if self._is_ore_blacklisted(ct, self.ore_target):
+                self._nav_dbg(ct, f"Clearing blacklisted ore target {self.ore_target}.")
                 self._clear_ore_target()
+            else:
+                ore_pos = Position(self.ore_target[0], self.ore_target[1])
+
+                # Only evaluate conditions if the target is ACTUALLY in vision
+                if ct.is_in_vision(ore_pos):
+                    completed_extractor = self._ore_has_completed_extractor(ct, ore_pos)
+                    blocked_type = self._ore_blocking_structure_type(ct, ore_pos)
+
+                    if completed_extractor or blocked_type is not None:
+                        self._nav_dbg(
+                            ct,
+                            (
+                                "Clearing ore target "
+                                f"{self.ore_target}: "
+                                f"completed_extractor={completed_extractor} "
+                                f"blocked_type={blocked_type}"
+                            ),
+                        )
+                        self._clear_ore_target()
 
         if self.ore_target is None:
             self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores, map_history)
+            self._nav_dbg(ct, f"Selected ore target -> {self.ore_target}")
 
         if self.ore_target is None:
+            self._nav_dbg(ct, "No ore target; falling back to center exploration nav.")
             return self._run_center_exploration(ct)
 
         ore_pos = Position(self.ore_target[0], self.ore_target[1])
+        if self._should_run_diagonal_ore_alignment(my_pos, ore_pos):
+            if self._run_diagonal_ore_alignment(ct, ore_pos):
+                return True
+        else:
+            self._clear_diagonal_alignment_state()
+
         if self._in_action_radius(my_pos, ore_pos):
+            # Avoid diagonal extractor placement attempts; bridge/conveyor follow-up
+            # requires clean NEWS adjacency around the extractor tile.
+            if not self._is_adjacent_cardinal(my_pos, ore_pos):
+                self._move_to_cardinal_adjacent_tile(ct, ore_pos)
+                return True
+
             build_result = self._build_generator_on_ore(ct, ore_pos)
             if build_result == "built":
                 self._clear_ore_target()
-                self.agent_phase = "RETURN_CORE"
+                self._start_post_build_alignment(ore_pos)
                 self._return_nav_target = None
                 self._post_bridge_target = None
                 return True
@@ -83,16 +153,29 @@ class BridgeBuilder:
             target=(ore_pos.x, ore_pos.y),
         )
         if move_dir is None:
+            self._nav_dbg(
+                ct,
+                (
+                    f"Ore navigation returned None for target=({ore_pos.x},{ore_pos.y}); "
+                    "clearing ore target."
+                ),
+            )
             self._clear_ore_target()
             return True
+        self._nav_dbg(
+            ct,
+            f"Ore navigation move_dir={move_dir.name} target=({ore_pos.x},{ore_pos.y})",
+        )
         return self._road_then_move(ct, move_dir)
 
     def _run_return_core(self, ct: Controller, core_pos: tuple[int, int] | None) -> bool:
         if core_pos is None:
+            self._nav_dbg(ct, "Return-core phase with unknown core_pos; holding.")
             return True
 
         my_pos = ct.get_position()
         if self._is_on_friendly_core(ct, my_pos):
+            self._nav_dbg(ct, "Reached friendly core tile; finishing return cycle.")
             self._finish_return_cycle()
             return True
 
@@ -101,6 +184,10 @@ class BridgeBuilder:
         if self._post_bridge_target is not None:
             tx, ty = self._post_bridge_target
             if (my_pos.x, my_pos.y) == (tx, ty):
+                self._nav_dbg(
+                    ct,
+                    f"Arrived at post-bridge target=({tx},{ty}); clearing target.",
+                )
                 self._post_bridge_target = None
                 self._return_nav_target = None
             else:
@@ -111,7 +198,15 @@ class BridgeBuilder:
                     target=(tx, ty),
                 )
                 if move_dir is None:
+                    self._nav_dbg(
+                        ct,
+                        f"No nav move toward post-bridge target=({tx},{ty}); holding.",
+                    )
                     return True
+                self._nav_dbg(
+                    ct,
+                    f"Post-bridge navigation move_dir={move_dir.name} target=({tx},{ty})",
+                )
                 self._road_then_move(ct, move_dir)
                 new_pos = ct.get_position()
                 if (new_pos.x, new_pos.y) == (tx, ty):
@@ -126,41 +221,76 @@ class BridgeBuilder:
         )
         if bridge_target is None:
             move_target = core_pos
+            self._nav_dbg(ct, f"No bridge target; navigating directly to core={move_target}.")
         else:
-            # Match old bridge-cycle behavior: wait until bridge placement is possible.
-            if ct.get_action_cooldown() != 0:
-                return True
-
-            affordable_bridge, _, _ = get_cost_affordability(ct, "get_bridge_cost")
-            if not affordable_bridge:
-                # Hold position and save for bridge to maintain chain behavior.
-                return True
-
-            target_is_existing_return_path = self._is_on_friendly_return_path(
-                ct, bridge_target
-            )
-            self._clear_underfoot_for_bridge(ct, my_pos)
-
-            if ct.can_build_bridge(my_pos, bridge_target):
-                ct.build_bridge(my_pos, bridge_target)
-                if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
-                    self._finish_return_cycle()
-                    return True
-                self._post_bridge_target = (bridge_target.x, bridge_target.y)
-                move_target = self._post_bridge_target
+            if self._is_on_friendly_bridge(ct, my_pos):
+                # Already standing on a friendly bridge tile: skip bridge placement and
+                # continue along normal return navigation.
+                move_target = core_pos
+                self._nav_dbg(
+                    ct,
+                    (
+                        f"Standing on friendly bridge at ({my_pos.x},{my_pos.y}); "
+                        f"skipping bridge build and navigating to core={move_target}."
+                    ),
+                )
             else:
-                # Roads/conveyors underfoot can block start tile bridge placement.
-                if self._clear_underfoot_for_bridge(ct, my_pos) and ct.can_build_bridge(
-                    my_pos, bridge_target
-                ):
+                # Match old bridge-cycle behavior: wait until bridge placement is possible.
+                if ct.get_action_cooldown() != 0:
+                    return True
+
+                affordable_bridge, _, _ = get_cost_affordability(ct, "get_bridge_cost")
+                if not affordable_bridge:
+                    # Hold position and save for bridge to maintain chain behavior.
+                    self._nav_dbg(ct, "Bridge not affordable; holding instead of moving.")
+                    return True
+
+                target_is_existing_return_path = self._is_on_friendly_return_path(
+                    ct, bridge_target
+                )
+                self._clear_underfoot_for_bridge(ct, my_pos)
+
+                if ct.can_build_bridge(my_pos, bridge_target):
                     ct.build_bridge(my_pos, bridge_target)
                     if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
                         self._finish_return_cycle()
                         return True
                     self._post_bridge_target = (bridge_target.x, bridge_target.y)
                     move_target = self._post_bridge_target
+                    self._nav_dbg(
+                        ct,
+                        (
+                            f"Built bridge toward ({bridge_target.x},{bridge_target.y}); "
+                            f"post_bridge_target={self._post_bridge_target}"
+                        ),
+                    )
                 else:
-                    return True
+                    # Roads/conveyors underfoot can block start tile bridge placement.
+                    if self._clear_underfoot_for_bridge(ct, my_pos) and ct.can_build_bridge(
+                        my_pos, bridge_target
+                    ):
+                        ct.build_bridge(my_pos, bridge_target)
+                        if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
+                            self._finish_return_cycle()
+                            return True
+                        self._post_bridge_target = (bridge_target.x, bridge_target.y)
+                        move_target = self._post_bridge_target
+                        self._nav_dbg(
+                            ct,
+                            (
+                                "Built bridge after underfoot clear; "
+                                f"post_bridge_target={self._post_bridge_target}"
+                            ),
+                        )
+                    else:
+                        self._nav_dbg(
+                            ct,
+                            (
+                                f"Cannot build bridge from ({my_pos.x},{my_pos.y}) "
+                                f"to ({bridge_target.x},{bridge_target.y}); holding."
+                            ),
+                        )
+                        return True
 
         move_dir = self._next_nav_move(
             ct,
@@ -169,7 +299,15 @@ class BridgeBuilder:
             target=move_target,
         )
         if move_dir is None:
+            self._nav_dbg(
+                ct,
+                f"Return navigation returned None for move_target={move_target}; holding.",
+            )
             return True
+        self._nav_dbg(
+            ct,
+            f"Return navigation move_dir={move_dir.name} move_target={move_target}",
+        )
         return self._road_then_move(ct, move_dir)
 
     def _run_center_exploration(self, ct: Controller) -> bool:
@@ -181,7 +319,12 @@ class BridgeBuilder:
             target=target,
         )
         if move_dir is None:
+            self._nav_dbg(
+                ct,
+                f"Center exploration nav returned None for target={target}; holding.",
+            )
             return True
+        self._nav_dbg(ct, f"Center exploration move_dir={move_dir.name} target={target}")
         return self._road_then_move(ct, move_dir)
 
     def _next_nav_move(
@@ -194,9 +337,24 @@ class BridgeBuilder:
         current_target = getattr(self, nav_target_attr)
         cur = ct.get_position()
         if current_target != target:
+            self._nav_dbg(
+                ct,
+                (
+                    f"{nav_target_attr} retarget from {current_target} to {target} "
+                    f"start=({cur.x},{cur.y})"
+                ),
+            )
             nav.set_target(target[0], target[1], cur.x, cur.y)
             setattr(self, nav_target_attr, target)
-        return nav.next_move(ct)
+        move_dir = nav.next_move(ct)
+        self._nav_dbg(
+            ct,
+            (
+                f"{nav_target_attr} next_move -> "
+                f"{move_dir.name if move_dir else None} toward {target}"
+            ),
+        )
+        return move_dir
 
     def _visible_ores_from_scan(
         self,
@@ -233,6 +391,9 @@ class BridgeBuilder:
         best_target: tuple[int, int] | None = None
         best_dist_sq: int | None = None
         for ox, oy in visible_ores:
+            if self._is_ore_blacklisted(ct, (ox, oy)):
+                self._nav_dbg(ct, f"Skipping blacklisted ore ({ox},{oy}).")
+                continue
             ore_pos = Position(ox, oy)
             if self._ore_has_completed_extractor(ct, ore_pos):
                 continue
@@ -259,13 +420,23 @@ class BridgeBuilder:
         if isinstance(map_history, dict):
             probe.attach_terrain_memory(map_history)
         probe.set_target(ore_pos.x, ore_pos.y, my_pos.x, my_pos.y)
-        return probe.next_move(ct) is not None
+        probe_move = probe.next_move(ct)
+        self._nav_dbg(
+            ct,
+            (
+                f"Probe nav toward ore=({ore_pos.x},{ore_pos.y}) "
+                f"from=({my_pos.x},{my_pos.y}) move={probe_move.name if probe_move else None}"
+            ),
+        )
+        return probe_move is not None
 
     def _build_generator_on_ore(
         self,
         ct: Controller,
         ore_pos: Position,
     ) -> Literal["built", "waiting_money", "blocked", "cooldown"]:
+        self._clear_ore_build_obstructions(ct, ore_pos)
+
         if self._ore_has_completed_extractor(ct, ore_pos):
             return "blocked"
         if self._ore_blocking_structure_type(ct, ore_pos) is not None:
@@ -324,6 +495,8 @@ class BridgeBuilder:
         return None
 
     def _is_valid_bridge_target_tile(self, ct: Controller, pos: Position) -> bool:
+        if self._is_diagonal_adjacent_to_extractor(ct, pos):
+            return False
         if self._is_on_friendly_core(ct, pos):
             return True
         building_id = ct.get_tile_building_id(pos)
@@ -335,6 +508,25 @@ class BridgeBuilder:
             return ct.get_tile_env(pos) == Environment.EMPTY
         except Exception:
             return False
+
+    @staticmethod
+    def _is_diagonal_adjacent_to_extractor(ct: Controller, pos: Position) -> bool:
+        generator_type = getattr(EntityType, "GENERATOR", None)
+        extractor_types = {EntityType.HARVESTER}
+        if generator_type is not None:
+            extractor_types.add(generator_type)
+
+        diagonals = ((1, 1), (1, -1), (-1, 1), (-1, -1))
+        for dx, dy in diagonals:
+            check = Position(pos.x + dx, pos.y + dy)
+            if not ct.is_in_vision(check):
+                continue
+            building_id = ct.get_tile_building_id(check)
+            if building_id is None:
+                continue
+            if ct.get_entity_type(building_id) in extractor_types:
+                return True
+        return False
 
     @staticmethod
     def _has_marker_at(ct: Controller, pos: Position) -> bool:
@@ -378,6 +570,16 @@ class BridgeBuilder:
         )
 
     @staticmethod
+    def _is_on_friendly_bridge(ct: Controller, pos: Position) -> bool:
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+        return (
+            ct.get_entity_type(building_id) == EntityType.BRIDGE
+            and ct.get_team(building_id) == ct.get_team()
+        )
+
+    @staticmethod
     def _ore_has_completed_extractor(ct: Controller, ore_pos: Position) -> bool:
         if not ct.is_in_vision(ore_pos):
             return False
@@ -417,9 +619,17 @@ class BridgeBuilder:
         dy = my_pos.y - target.y
         return dx * dx + dy * dy <= ACTION_RADIUS_SQ
 
-    @staticmethod
-    def _road_then_move(ct: Controller, move_dir: Direction) -> bool:
+    def _road_then_move(self, ct: Controller, move_dir: Direction) -> bool:
+        my_pos = ct.get_position()
         move_pos = ct.get_position().add(move_dir)
+        self._nav_dbg(
+            ct,
+            (
+                f"road_then_move start from=({my_pos.x},{my_pos.y}) "
+                f"dir={move_dir.name} to=({move_pos.x},{move_pos.y}) "
+                f"move_cd={ct.get_move_cooldown()} action_cd={ct.get_action_cooldown()}"
+            ),
+        )
         if not ct.is_tile_passable(move_pos):
             has_friendly_marker = any(
                 ct.get_entity_type(eid) == EntityType.MARKER
@@ -431,14 +641,37 @@ class BridgeBuilder:
                 affordable_road, _, _ = get_cost_affordability(ct, "get_road_cost")
                 if not affordable_road:
                     # Hold position and save for road.
+                    self._nav_dbg(
+                        ct,
+                        (
+                            f"road_then_move blocked at ({move_pos.x},{move_pos.y}); "
+                            "road unaffordable, holding."
+                        ),
+                    )
                     return True
                 if ct.get_action_cooldown() == 0 and ct.can_build_road(move_pos):
                     ct.build_road(move_pos)
+                    self._nav_dbg(
+                        ct,
+                        f"Built road at ({move_pos.x},{move_pos.y}) before moving.",
+                    )
                     return True
 
         if ct.get_move_cooldown() == 0 and ct.can_move(move_dir):
             ct.move(move_dir)
+            new_pos = ct.get_position()
+            self._nav_dbg(
+                ct,
+                f"Move succeeded dir={move_dir.name} new_pos=({new_pos.x},{new_pos.y})",
+            )
             return True
+        self._nav_dbg(
+            ct,
+            (
+                f"Move failed dir={move_dir.name} move_cd={ct.get_move_cooldown()} "
+                f"can_move={ct.can_move(move_dir)}"
+            ),
+        )
         return False
 
     @staticmethod
@@ -462,7 +695,301 @@ class BridgeBuilder:
 
         return False
 
+    @staticmethod
+    def _clear_ore_build_obstructions(ct: Controller, ore_pos: Position) -> bool:
+        acted = False
+
+        building_id = ct.get_tile_building_id(ore_pos)
+        if building_id is not None:
+            b_type = ct.get_entity_type(building_id)
+            b_team = ct.get_team(building_id)
+            if (
+                b_team == ct.get_team()
+                and b_type == EntityType.ROAD
+                and ct.can_destroy(ore_pos)
+            ):
+                ct.destroy(ore_pos)
+                acted = True
+
+        if BridgeBuilder._has_friendly_marker_at(ct, ore_pos) and ct.can_destroy(ore_pos):
+            ct.destroy(ore_pos)
+            acted = True
+
+        return acted
+
+    @staticmethod
+    def _has_friendly_marker_at(ct: Controller, pos: Position) -> bool:
+        for entity_id in ct.get_nearby_entities():
+            if ct.get_entity_type(entity_id) != EntityType.MARKER:
+                continue
+            if ct.get_team(entity_id) != ct.get_team():
+                continue
+            if ct.get_position(entity_id) == pos:
+                return True
+        return False
+
+    def _start_post_build_alignment(self, ore_pos: Position) -> None:
+        self._post_build_align_ore_target = (ore_pos.x, ore_pos.y)
+
+    def _run_post_build_cardinal_alignment(self, ct: Controller) -> bool:
+        if self._post_build_align_ore_target is None:
+            return True
+
+        ox, oy = self._post_build_align_ore_target
+        ore_pos = Position(ox, oy)
+        my_pos = ct.get_position()
+        if self._is_adjacent_cardinal(my_pos, ore_pos):
+            self._post_build_align_ore_target = None
+            self.agent_phase = "RETURN_CORE"
+            return True
+
+        moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
+        if moved:
+            new_pos = ct.get_position()
+            if self._is_adjacent_cardinal(new_pos, ore_pos):
+                self._post_build_align_ore_target = None
+                self.agent_phase = "RETURN_CORE"
+            return True
+
+        # Hold if no legal cardinal-adjacent move is currently possible.
+        return True
+
+    def _move_to_cardinal_adjacent_tile(self, ct: Controller, ore_pos: Position) -> bool:
+        my_pos = ct.get_position()
+        self._nav_dbg(
+            ct,
+            (
+                f"Cardinal-align start pos=({my_pos.x},{my_pos.y}) "
+                f"ore=({ore_pos.x},{ore_pos.y})"
+            ),
+        )
+        for move_dir in _CARDINAL_DIRECTIONS:
+            nxt = my_pos.add(move_dir)
+            if not self._is_adjacent_cardinal(nxt, ore_pos):
+                self._nav_dbg(
+                    ct,
+                    f"Cardinal-align skip dir={move_dir.name} next=({nxt.x},{nxt.y}) not adjacent.",
+                )
+                continue
+
+            try:
+                if ct.get_tile_env(nxt) == Environment.WALL:
+                    self._nav_dbg(
+                        ct,
+                        f"Cardinal-align skip dir={move_dir.name} due to wall.",
+                    )
+                    continue
+                b_id = ct.get_tile_building_id(nxt)
+                if b_id is not None:
+                    b_type = ct.get_entity_type(b_id)
+                    if b_type not in (
+                        EntityType.ROAD,
+                        EntityType.BRIDGE,
+                        EntityType.CORE,
+                        EntityType.CONVEYOR,
+                        EntityType.ARMOURED_CONVEYOR,
+                    ):
+                        self._nav_dbg(
+                            ct,
+                            (
+                                f"Cardinal-align skip dir={move_dir.name} "
+                                f"blocked by building={b_type}."
+                            ),
+                        )
+                        continue
+            except Exception:
+                self._nav_dbg(
+                    ct,
+                    f"Cardinal-align exception probing dir={move_dir.name}; skipping.",
+                )
+                continue
+
+            if self._road_then_move(ct, move_dir):
+                self._nav_dbg(
+                    ct,
+                    f"Cardinal-align moved dir={move_dir.name}.",
+                )
+                return True
+
+        self._nav_dbg(ct, "Cardinal-align found no legal move.")
+        return False
+
+    @staticmethod
+    def _is_adjacent_cardinal(a: Position, b: Position) -> bool:
+        return abs(a.x - b.x) + abs(a.y - b.y) == 1
+
+    @staticmethod
+    def _is_adjacent_diagonal(a: Position, b: Position) -> bool:
+        return abs(a.x - b.x) == 1 and abs(a.y - b.y) == 1
+
+    def _should_run_diagonal_ore_alignment(self, my_pos: Position, ore_pos: Position) -> bool:
+        ore_target = (ore_pos.x, ore_pos.y)
+        if self._is_adjacent_diagonal(my_pos, ore_pos):
+            return True
+        if self._diag_align_ore_target != ore_target:
+            return False
+        return not self._is_adjacent_cardinal(my_pos, ore_pos)
+
+    def _run_diagonal_ore_alignment(self, ct: Controller, ore_pos: Position) -> bool:
+        my_pos = ct.get_position()
+        ore_target = (ore_pos.x, ore_pos.y)
+        if self._diag_align_ore_target != ore_target:
+            self._diag_align_ore_target = ore_target
+            self._diag_align_nav_target = None
+            self._diag_align_nav = TangentNav()
+
+        if self._is_adjacent_cardinal(my_pos, ore_pos):
+            self._clear_diagonal_alignment_state()
+            return False
+
+        open_tiles = self._open_cardinal_ore_tiles_in_vision(ct, ore_pos)
+        if not open_tiles:
+            self._blacklist_current_ore(
+                ct,
+                reason=(
+                    "diagonal ore alignment found no open cardinal ore-adjacent tiles "
+                    "in vision"
+                ),
+            )
+            return True
+
+        targets = sorted(
+            open_tiles,
+            key=lambda tile: (
+                (my_pos.x - tile[0]) ** 2 + (my_pos.y - tile[1]) ** 2,
+                tile[0],
+                tile[1],
+            ),
+        )
+        if self._diag_align_nav_target in open_tiles:
+            preferred = self._diag_align_nav_target
+            targets = [preferred, *[tile for tile in targets if tile != preferred]]
+
+        for target in targets:
+            move_dir = self._next_nav_move(
+                ct,
+                nav=self._diag_align_nav,
+                nav_target_attr="_diag_align_nav_target",
+                target=target,
+            )
+            if move_dir is None:
+                continue
+            self._nav_dbg(
+                ct,
+                (
+                    "Diagonal ore-align bugnav move "
+                    f"dir={move_dir.name} toward=({target[0]},{target[1]}) "
+                    f"ore=({ore_pos.x},{ore_pos.y})"
+                ),
+            )
+            self._road_then_move(ct, move_dir)
+            return True
+
+        self._blacklist_current_ore(
+            ct,
+            reason=(
+                "diagonal ore alignment found open ore-adjacent tiles but no bugnav "
+                "step toward any target"
+            ),
+        )
+        return True
+
+    def _open_cardinal_ore_tiles_in_vision(
+        self, ct: Controller, ore_pos: Position
+    ) -> set[tuple[int, int]]:
+        open_tiles: set[tuple[int, int]] = set()
+        for move_dir in _CARDINAL_DIRECTIONS:
+            cand = ore_pos.add(move_dir)
+            if self._is_open_stand_tile_in_vision(ct, cand):
+                open_tiles.add((cand.x, cand.y))
+        return open_tiles
+
+    @staticmethod
+    def _is_open_stand_tile_in_vision(ct: Controller, pos: Position) -> bool:
+        if not ct.is_in_vision(pos):
+            return False
+        try:
+            if ct.get_tile_env(pos) == Environment.WALL:
+                return False
+            building_id = ct.get_tile_building_id(pos)
+            if building_id is not None:
+                b_type = ct.get_entity_type(building_id)
+                own_core = b_type == EntityType.CORE and ct.get_team(building_id) == ct.get_team()
+                if not own_core and b_type not in _PASSABLE_BUILDINGS:
+                    return False
+            builder_id = ct.get_tile_builder_bot_id(pos)
+            if builder_id is not None:
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _clear_diagonal_alignment_state(self) -> None:
+        self._diag_align_nav = TangentNav()
+        self._diag_align_nav_target = None
+        self._diag_align_ore_target = None
+
+    def _cleanup_ore_blacklist(self, ct: Controller) -> None:
+        curr_round = ct.get_current_round()
+        prev_size = len(self._ore_blacklist)
+        self._ore_blacklist = {
+            ore: expiry for ore, expiry in self._ore_blacklist.items() if expiry > curr_round
+        }
+        if prev_size != len(self._ore_blacklist):
+            self._nav_dbg(
+                ct,
+                (
+                    f"Ore blacklist cleanup {prev_size}->{len(self._ore_blacklist)} "
+                    f"at round={curr_round}"
+                ),
+            )
+
+    def _is_ore_blacklisted(self, ct: Controller, ore: tuple[int, int]) -> bool:
+        expiry = self._ore_blacklist.get(ore)
+        return expiry is not None and expiry > ct.get_current_round()
+
+    def _blacklist_current_ore(self, ct: Controller, reason: str) -> None:
+        if self.ore_target is None:
+            return
+        expiry = ct.get_current_round() + _ORE_TARGET_BLACKLIST_ROUNDS
+        self._ore_blacklist[self.ore_target] = expiry
+        self._nav_dbg(
+            ct,
+            (
+                f"Blacklisting ore {self.ore_target} until round={expiry}. "
+                f"reason={reason}"
+            ),
+        )
+        self._clear_ore_target()
+
     def _clear_ore_target(self) -> None:
         self.ore_target = None
         self._ore_nav_target = None
         self._ore_nav = TangentNav()
+        self._clear_diagonal_alignment_state()
+
+    def _nav_dbg(self, ct: Controller, msg: str) -> None:
+        if not self._nav_dbg_enabled(ct):
+            return
+        current_round = ct.get_current_round()
+        pos = ct.get_position()
+        print(
+            (
+                f"[R{current_round}][ID={ct.get_id()}][BridgeNav][{pos.x},{pos.y}] "
+                f"{msg}"
+            ),
+            file=sys.stderr,
+        )
+
+    def _nav_dbg_enabled(self, ct: Controller) -> bool:
+        if not self._NAV_DEBUG:
+            return False
+        current_round = ct.get_current_round()
+        in_round_window = (
+            self._NAV_DEBUG_START_ROUND <= current_round <= self._NAV_DEBUG_END_ROUND
+        )
+        if not in_round_window:
+            return False
+        if not self._NAV_DEBUG_ONLY_TARGET_ID:
+            return True
+        return ct.get_id() == self._NAV_DEBUG_TARGET_UNIT_ID
