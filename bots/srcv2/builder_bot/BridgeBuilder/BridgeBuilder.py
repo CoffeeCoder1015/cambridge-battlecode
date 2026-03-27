@@ -25,10 +25,13 @@ Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
 
 class BridgeBuilder:
-    _NAV_DEBUG = False
-    _NAV_DEBUG_UNIT_ID = 3
-    _NAV_DEBUG_START_ROUND = 200
-    _NAV_DEBUG_END_ROUND = 250
+    # Master toggle for high-detail BridgeBuilder navigation logs.
+    _NAV_DEBUG = True
+    # Feature flag: when enabled, only the target unit id emits logs.
+    _NAV_DEBUG_ONLY_TARGET_ID = True
+    _NAV_DEBUG_TARGET_UNIT_ID = 3
+    _NAV_DEBUG_START_ROUND = 600
+    _NAV_DEBUG_END_ROUND = 700
 
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
@@ -201,40 +204,34 @@ class BridgeBuilder:
             move_target = core_pos
             self._nav_dbg(ct, f"No bridge target; navigating directly to core={move_target}.")
         else:
-            # Match old bridge-cycle behavior: wait until bridge placement is possible.
-            if ct.get_action_cooldown() != 0:
-                return True
-
-            affordable_bridge, _, _ = get_cost_affordability(ct, "get_bridge_cost")
-            if not affordable_bridge:
-                # Hold position and save for bridge to maintain chain behavior.
-                self._nav_dbg(ct, "Bridge not affordable; holding instead of moving.")
-                return True
-
-            target_is_existing_return_path = self._is_on_friendly_return_path(
-                ct, bridge_target
-            )
-            self._clear_underfoot_for_bridge(ct, my_pos)
-
-            if ct.can_build_bridge(my_pos, bridge_target):
-                ct.build_bridge(my_pos, bridge_target)
-                if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
-                    self._finish_return_cycle()
-                    return True
-                self._post_bridge_target = (bridge_target.x, bridge_target.y)
-                move_target = self._post_bridge_target
+            if self._is_on_friendly_bridge(ct, my_pos):
+                # Already standing on a friendly bridge tile: skip bridge placement and
+                # continue along normal return navigation.
+                move_target = core_pos
                 self._nav_dbg(
                     ct,
                     (
-                        f"Built bridge toward ({bridge_target.x},{bridge_target.y}); "
-                        f"post_bridge_target={self._post_bridge_target}"
+                        f"Standing on friendly bridge at ({my_pos.x},{my_pos.y}); "
+                        f"skipping bridge build and navigating to core={move_target}."
                     ),
                 )
             else:
-                # Roads/conveyors underfoot can block start tile bridge placement.
-                if self._clear_underfoot_for_bridge(ct, my_pos) and ct.can_build_bridge(
-                    my_pos, bridge_target
-                ):
+                # Match old bridge-cycle behavior: wait until bridge placement is possible.
+                if ct.get_action_cooldown() != 0:
+                    return True
+
+                affordable_bridge, _, _ = get_cost_affordability(ct, "get_bridge_cost")
+                if not affordable_bridge:
+                    # Hold position and save for bridge to maintain chain behavior.
+                    self._nav_dbg(ct, "Bridge not affordable; holding instead of moving.")
+                    return True
+
+                target_is_existing_return_path = self._is_on_friendly_return_path(
+                    ct, bridge_target
+                )
+                self._clear_underfoot_for_bridge(ct, my_pos)
+
+                if ct.can_build_bridge(my_pos, bridge_target):
                     ct.build_bridge(my_pos, bridge_target)
                     if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
                         self._finish_return_cycle()
@@ -244,19 +241,37 @@ class BridgeBuilder:
                     self._nav_dbg(
                         ct,
                         (
-                            "Built bridge after underfoot clear; "
+                            f"Built bridge toward ({bridge_target.x},{bridge_target.y}); "
                             f"post_bridge_target={self._post_bridge_target}"
                         ),
                     )
                 else:
-                    self._nav_dbg(
-                        ct,
-                        (
-                            f"Cannot build bridge from ({my_pos.x},{my_pos.y}) "
-                            f"to ({bridge_target.x},{bridge_target.y}); holding."
-                        ),
-                    )
-                    return True
+                    # Roads/conveyors underfoot can block start tile bridge placement.
+                    if self._clear_underfoot_for_bridge(ct, my_pos) and ct.can_build_bridge(
+                        my_pos, bridge_target
+                    ):
+                        ct.build_bridge(my_pos, bridge_target)
+                        if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
+                            self._finish_return_cycle()
+                            return True
+                        self._post_bridge_target = (bridge_target.x, bridge_target.y)
+                        move_target = self._post_bridge_target
+                        self._nav_dbg(
+                            ct,
+                            (
+                                "Built bridge after underfoot clear; "
+                                f"post_bridge_target={self._post_bridge_target}"
+                            ),
+                        )
+                    else:
+                        self._nav_dbg(
+                            ct,
+                            (
+                                f"Cannot build bridge from ({my_pos.x},{my_pos.y}) "
+                                f"to ({bridge_target.x},{bridge_target.y}); holding."
+                            ),
+                        )
+                        return True
 
         move_dir = self._next_nav_move(
             ct,
@@ -533,6 +548,16 @@ class BridgeBuilder:
         )
 
     @staticmethod
+    def _is_on_friendly_bridge(ct: Controller, pos: Position) -> bool:
+        building_id = ct.get_tile_building_id(pos)
+        if building_id is None:
+            return False
+        return (
+            ct.get_entity_type(building_id) == EntityType.BRIDGE
+            and ct.get_team(building_id) == ct.get_team()
+        )
+
+    @staticmethod
     def _ore_has_completed_extractor(ct: Controller, ore_pos: Position) -> bool:
         if not ct.is_in_vision(ore_pos):
             return False
@@ -792,7 +817,11 @@ class BridgeBuilder:
         if not self._NAV_DEBUG:
             return False
         current_round = ct.get_current_round()
-        return (
+        in_round_window = (
             self._NAV_DEBUG_START_ROUND <= current_round <= self._NAV_DEBUG_END_ROUND
-            and ct.get_id() == self._NAV_DEBUG_UNIT_ID
         )
+        if not in_round_window:
+            return False
+        if not self._NAV_DEBUG_ONLY_TARGET_ID:
+            return True
+        return ct.get_id() == self._NAV_DEBUG_TARGET_UNIT_ID
