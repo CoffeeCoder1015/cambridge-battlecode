@@ -487,6 +487,24 @@ class BridgeBuilder:
                 candidates.append(pos)
         if not candidates:
             return None
+
+        join_target = self._select_nearest_visible_friendly_chain_target(
+            ct=ct,
+            start_pos=start_pos,
+            core=core,
+            candidates=candidates,
+        )
+        if join_target is not None:
+            self._nav_dbg(
+                ct,
+                (
+                    "Selected nearby friendly chain join target "
+                    f"({join_target.x},{join_target.y}) from start "
+                    f"({start_pos.x},{start_pos.y})"
+                ),
+            )
+            return join_target
+
         candidates.sort(
             key=lambda p: (
                 p.distance_squared(core),
@@ -499,6 +517,59 @@ class BridgeBuilder:
             if self._is_valid_bridge_target_tile(ct, cand):
                 return cand
         return None
+
+    def _select_nearest_visible_friendly_chain_target(
+            self,
+            ct: Controller,
+            start_pos: Position,
+            core: Position,
+            candidates: list[Position],
+        ) -> Position | None:
+            chain_candidates: list[tuple[int, int, int, int, Position]] = []
+            start_dist_to_core = start_pos.distance_squared(core)
+
+            for cand in candidates:
+                if not ct.is_in_vision(cand):
+                    continue
+                try:
+                    building_id = ct.get_tile_building_id(cand)
+                except Exception:
+                    continue
+                if building_id is None:
+                    continue
+                if ct.get_team(building_id) != ct.get_team():
+                    continue
+                if ct.get_entity_type(building_id) not in (
+                    EntityType.BRIDGE,
+                    EntityType.CONVEYOR,
+                    EntityType.ARMOURED_CONVEYOR,
+                ):
+                    continue
+                if not self._is_valid_bridge_target_tile(ct, cand):
+                    continue
+                    
+                cand_dist_to_core = cand.distance_squared(core)
+                
+                # Prevent pointing backwards: only connect if it brings us closer to the core
+                if cand_dist_to_core >= start_dist_to_core:
+                    continue
+
+                chain_candidates.append(
+                    (
+                        start_pos.distance_squared(cand),
+                        cand_dist_to_core,
+                        cand.x,
+                        cand.y,
+                        cand,
+                    )
+                )
+
+            if not chain_candidates:
+                return None
+                
+            # Prioritize progress to core (c[1]) over immediate proximity to bot (c[0])
+            chain_candidates.sort(key=lambda c: (c[1], c[0], c[2], c[3]))
+            return chain_candidates[0][4]
 
     def _is_valid_bridge_target_tile(self, ct: Controller, pos: Position) -> bool:
         if self._is_diagonal_adjacent_to_extractor(ct, pos):
@@ -522,9 +593,13 @@ class BridgeBuilder:
         if generator_type is not None:
             extractor_types.add(generator_type)
 
+        width = ct.get_map_width()
+        height = ct.get_map_height()
         diagonals = ((1, 1), (1, -1), (-1, 1), (-1, -1))
         for dx, dy in diagonals:
             check = Position(pos.x + dx, pos.y + dy)
+            if not (0 <= check.x < width and 0 <= check.y < height):
+                continue
             if not ct.is_in_vision(check):
                 continue
             building_id = ct.get_tile_building_id(check)
