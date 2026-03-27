@@ -111,25 +111,28 @@ class Hound:
         set_nav_target,
         execute_nav_step,
     ) -> tuple[bool, tuple[int, int] | None]:
-        # Priority 1: Attack or approach nearby enemy buildings
-        attack_acted = self.attack(
+        if enemy_core_target is None:
+            hound_target = self.compute_enemy_core_target(ct, core_pos, known_symmetry)
+            if hound_target is not None:
+                enemy_core_target = hound_target
+
+        # Priority 1: Execute immediate offensive actions while hard-rushing core.
+        attack_acted, has_active_offensive_target = self.attack(
             ct, set_nav_target, execute_nav_step, enemy_core_target
         )
         if attack_acted:
             return True, enemy_core_target
 
-        if enemy_core_target is None:
-            hound_target = self.compute_enemy_core_target(ct, core_pos, known_symmetry)
-            if hound_target is None:
-                return False, enemy_core_target
-            enemy_core_target = hound_target
+        # Once the enemy core is known, always rush it unless we just acted.
+        if enemy_core_target is not None:
+            set_nav_target(*enemy_core_target)
+            return execute_nav_step(ct), enemy_core_target
 
-        set_nav_target(*enemy_core_target)
-        return execute_nav_step(ct), enemy_core_target
+        return False, enemy_core_target
 
     def attack(
         self, ct: Controller, set_nav_target, execute_nav_step, enemy_core_target
-    ):
+    ) -> tuple[bool, bool]:
         nearby_buildings = ct.get_nearby_buildings()
         current_position = ct.get_position()
         nearby_buildings = [
@@ -143,7 +146,9 @@ class Hound:
         ]
         nearby_buildings.sort(key=lambda x: x[1])
 
-        if enemy_core_target is not None and self.can_afford_sentinel(ct):
+        has_active_offensive_target = self.offensive_target_pos is not None
+
+        if enemy_core_target is not None:
             core_position = Position(*enemy_core_target)
             current_position = ct.get_position()
             resource_sources = list(
@@ -243,6 +248,7 @@ class Hound:
                                     harv_placement_pos.x,
                                     harv_placement_pos.y,
                                 )
+                                has_active_offensive_target = True
                                 break
                         if self.offensive_target_pos is not None:
                             break
@@ -266,10 +272,12 @@ class Hound:
                             )
                             if not feeds:
                                 self.offensive_target_pos = (e_pos.x, e_pos.y)
+                                has_active_offensive_target = True
                                 break
 
             # === STEP 4: Decoupled Execution ===
             if self.offensive_target_pos is not None:
+                has_active_offensive_target = True
                 t_pos = Position(*self.offensive_target_pos)
                 dist_sq = t_pos.distance_squared(ct.get_position())
 
@@ -289,14 +297,15 @@ class Hound:
                                 ct.get_current_round()
                             )
                             self.offensive_target_pos = None
-                            return False
+                            has_active_offensive_target = False
+                            return False, False
 
                 targeting_dir = t_pos.direction_to(core_position)
 
                 if ct.can_build_sentinel(t_pos, targeting_dir):
                     ct.build_sentinel(t_pos, targeting_dir)
                     self.offensive_target_pos = None
-                    return True
+                    return True, True
                 if existing_id is None:
                     # Tile is empty (or out of vision). Move to it.
                     set_nav_target(t_pos.x, t_pos.y)
@@ -304,7 +313,8 @@ class Hound:
                         if ct.can_build_sentinel(t_pos, targeting_dir):
                             ct.build_sentinel(t_pos, targeting_dir)
                             self.offensive_target_pos = None
-                        return True
+                            has_active_offensive_target = False
+                        return True, True
                 else:
                     # Something is blocking the tile. Attack it to clear the way!
                     if self.attack_sqr(
@@ -314,28 +324,12 @@ class Hound:
                         if ct.can_build_sentinel(t_pos, targeting_dir):
                             ct.build_sentinel(t_pos, targeting_dir)
                             self.offensive_target_pos = None
-                            return True
-                        return False
-                return True  # Actively pursuing target, block fallback
+                            has_active_offensive_target = False
+                            return True, True
+                        return False, True
+                return True, True  # Actively pursuing target, block fallback
 
-        # === STEP 5: Fallback Attack Logic ===
-        potential_targets = []
-        for b_type, b_dist, b_id in nearby_buildings:
-            b_target_pos = ct.get_position(b_id)
-            if (
-                ct.get_team(b_id) != ct.get_team()
-                and (b_target_pos.x, b_target_pos.y) not in self.offensive_no_go
-            ):
-                priority = self.PRIORITY_MAP.get(b_type, 10)
-                potential_targets.append((priority, -b_dist, b_id))
-
-        potential_targets.sort(reverse=True)
-
-        if potential_targets:
-            return self.attack_sqr(
-                ct, set_nav_target, execute_nav_step, potential_targets[0][2]
-            )
-        return False
+        return False, has_active_offensive_target
 
     def build_turret(
         self,

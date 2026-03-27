@@ -5,6 +5,7 @@ from .Movement.TangentBug import TangentBug
 from .Movement.ExplorationController import ExplorationController
 from .GuardedConveyer.GuardedConveyer import GuardedConveyer
 from .Movement.Hound import Hound
+from .Movement.HoundUltras import Hound as HoundUltras
 from .BridgeBuilding.BridgeBuilder import BridgeBuilder
 from .helpers import execute_nav_step, refresh_core_pos, set_nav_target
 
@@ -19,6 +20,7 @@ class BuilderBot:
         self.nav = TangentBug()
         self.guarded_conveyer = GuardedConveyer()
         self.hound = Hound(debug_prints=DEBUG_PRINTS)
+        self.hound_ultras = HoundUltras(debug_prints=DEBUG_PRINTS)
         self.bridge_builder = BridgeBuilder()
         self._target_set = False
         self.core_pos: tuple[int, int] | None = None
@@ -54,9 +56,18 @@ class BuilderBot:
             self.signal_propagator = SignalPropagator(core_pos=ct.get_position())
 
         if self.role is None:
-            self.role = "HOUND" if (ct.get_id() % 4 == 0) else "ECONOMY"
-            if self.role == "ECONOMY":
+            id_mod = ( ct.get_current_round()-1 ) % 10
+            print(id_mod)
+            if id_mod in (3,6,9):
+                print("I BUILD")
+                self.role = "ECONOMY"
                 self.agentmode = "BRIDGE_BUILDER"
+            elif id_mod in (0,1,2,4,5,7,8):
+                print("I HUNT CORE")
+                self.role = "HOUND_ULTRAS"
+            # elif id_mod  in (5,6):
+            #     print("I HUNT")
+            #     self.role = "HOUND"
 
         nearby_tiles = ct.get_nearby_tiles()
         """
@@ -65,9 +76,21 @@ class BuilderBot:
         """
 
         self.known_symmetry = self.symmetry_analyzer.update(ct)
+        self.nav.attach_terrain_memory(self.symmetry_analyzer.map_history)
 
         if self.role == "HOUND":
             self.agentmode, entered_hound_target = self.hound.try_enter_mode(
+                ct=ct,
+                agentmode=self.agentmode,
+                known_symmetry=self.known_symmetry,
+                core_pos=self.core_pos,
+                set_nav_target=self._set_nav_target,
+            )
+            if entered_hound_target is not None:
+                self.enemy_core_target = entered_hound_target
+
+        if self.role == "HOUND_ULTRAS":
+            self.agentmode, entered_hound_target = self.hound_ultras.try_enter_mode(
                 ct=ct,
                 agentmode=self.agentmode,
                 known_symmetry=self.known_symmetry,
@@ -127,14 +150,24 @@ class BuilderBot:
         HOUND MODE
         """
         if self.agentmode == "HOUND":
-            hound_acted, self.enemy_core_target = self.hound.run(
-                ct=ct,
-                enemy_core_target=self.enemy_core_target,
-                core_pos=self.core_pos,
-                known_symmetry=self.known_symmetry,
-                set_nav_target=self._set_nav_target,
-                execute_nav_step=self._execute_nav_step,
-            )
+            if self.role == "HOUND":
+                hound_acted, self.enemy_core_target = self.hound.run(
+                    ct=ct,
+                    enemy_core_target=self.enemy_core_target,
+                    core_pos=self.core_pos,
+                    known_symmetry=self.known_symmetry,
+                    set_nav_target=self._set_nav_target,
+                    execute_nav_step=self._execute_nav_step,
+                )
+            elif self.role == "HOUND_ULTRAS":
+                hound_acted, self.enemy_core_target = self.hound_ultras.run(
+                    ct=ct,
+                    enemy_core_target=self.enemy_core_target,
+                    core_pos=self.core_pos,
+                    known_symmetry=self.known_symmetry,
+                    set_nav_target=self._set_nav_target,
+                    execute_nav_step=self._execute_nav_step,
+                )
             if hound_acted:
                 return
 
