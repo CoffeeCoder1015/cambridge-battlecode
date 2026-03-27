@@ -58,7 +58,7 @@ class TangentNav:
     _RECENT_WINDOW = 8
     _MAX_BOUNDARY_STEPS = 300
     _DEBUG_MAX_ROUND = 300
-    _NEAR_TRAIL_REPULSE_COST = 45
+    _NEAR_TRAIL_REPULSE_COST = 70
     _DOUBLE_STEP_REPULSE_COST = 20_000
     _RECENT_TILE_PENALTY = 32
     # Reduced epsilon to prevent premature M-line exits in tight corridors
