@@ -1,4 +1,3 @@
-import random
 import sys
 from typing import Any, Literal
 
@@ -6,8 +5,6 @@ from cambc import Controller, Direction, EntityType, Environment, Position
 
 from ..Movement.TangentNav import TangentNav
 from ..helper import get_cost_affordability
-
-POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 50
 
 ACTION_RADIUS_SQ = 2
 ORE_ENVS = (Environment.ORE_TITANIUM,)
@@ -34,8 +31,8 @@ class BridgeBuilder:
     # Feature flag: when enabled, only the target unit id emits logs.
     _NAV_DEBUG_ONLY_TARGET_ID = True
     _NAV_DEBUG_TARGET_UNIT_ID = 3
-    _NAV_DEBUG_START_ROUND = 300
-    _NAV_DEBUG_END_ROUND = 420
+    _NAV_DEBUG_START_ROUND = 800
+    _NAV_DEBUG_END_ROUND = 850
 
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
@@ -50,7 +47,6 @@ class BridgeBuilder:
         self._diag_align_nav_target: tuple[int, int] | None = None
         self._diag_align_ore_target: tuple[int, int] | None = None
         self._ore_blacklist: dict[tuple[int, int], int] = {}
-        self._greedy_return_no_join_merge = False
 
     def run(
         self,
@@ -140,7 +136,6 @@ class BridgeBuilder:
 
             build_result = self._build_generator_on_ore(ct, ore_pos)
             if build_result == "built":
-                self._roll_post_harvester_return_mode(ct)
                 self._clear_ore_target()
                 self._start_post_build_alignment(ore_pos)
                 self._return_nav_target = None
@@ -222,91 +217,66 @@ class BridgeBuilder:
                     self._return_nav_target = None
                 return True
 
-        skip_bridge_placement = False
-        if self._greedy_return_no_join_merge:
-            self._nav_dbg(
-                ct,
-                "Greedy return active; skipping adjacent endpoint join shortcut.",
-            )
+        bridge_target = self._select_bridge_target_toward_core(
+            ct=ct,
+            start_pos=my_pos,
+            core_pos=core_pos,
+        )
+        if bridge_target is None:
+            move_target = core_pos
+            self._nav_dbg(ct, f"No bridge target; navigating directly to core={move_target}.")
         else:
-            endpoint_result = self._try_build_adjacent_endpoint_conveyor(ct, my_pos)
-            if endpoint_result == "completed_cycle":
+            if self._is_on_friendly_bridge(ct, my_pos):
+                # Already standing on a friendly bridge tile: skip bridge placement and
+                # continue along normal return navigation.
+                move_target = core_pos
                 self._nav_dbg(
                     ct,
-                    "Adjacent endpoint conveyor placed; finishing return cycle for this ore.",
-                )
-                self._finish_return_cycle()
-                return True
-            skip_bridge_placement = endpoint_result == "continue_nav"
-            if endpoint_result == "handled":
-                return True
-
-        move_target = core_pos
-        if not skip_bridge_placement:
-            bridge_target = self._select_bridge_target_toward_core(
-                ct=ct,
-                start_pos=my_pos,
-                core_pos=core_pos,
-                allow_chain_join=not self._greedy_return_no_join_merge,
-                allow_merge_with_existing_return_path=(
-                    not self._greedy_return_no_join_merge
-                ),
-            )
-            if bridge_target is None:
-                self._nav_dbg(
-                    ct,
-                    f"No bridge target; navigating directly to core={move_target}.",
+                    (
+                        f"Standing on friendly bridge at ({my_pos.x},{my_pos.y}); "
+                        f"skipping bridge build and navigating to core={move_target}."
+                    ),
                 )
             else:
-                if self._is_on_friendly_bridge(ct, my_pos):
-                    # Already standing on a friendly bridge tile: skip bridge placement and
-                    # continue along normal return navigation.
+                # Match old bridge-cycle behavior: wait until bridge placement is possible.
+                if ct.get_action_cooldown() != 0:
+                    return True
+
+                affordable_bridge, _, _ = get_cost_affordability(ct, "get_bridge_cost")
+                if not affordable_bridge:
+                    # Hold position and save for bridge to maintain chain behavior.
+                    self._nav_dbg(ct, "Bridge not affordable; holding instead of moving.")
+                    return True
+
+                if self._try_attack_underfoot_enemy_road(ct, my_pos):
+                    return True
+
+                target_is_existing_return_path = self._is_on_friendly_return_path(
+                    ct, bridge_target
+                )
+                self._clear_underfoot_for_bridge(ct, my_pos)
+
+                if ct.can_build_bridge(my_pos, bridge_target):
+                    ct.build_bridge(my_pos, bridge_target)
+                    if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
+                        self._finish_return_cycle()
+                        return True
+                    self._post_bridge_target = (bridge_target.x, bridge_target.y)
+                    move_target = self._post_bridge_target
                     self._nav_dbg(
                         ct,
                         (
-                            f"Standing on friendly bridge at ({my_pos.x},{my_pos.y}); "
-                            f"skipping bridge build and navigating to core={move_target}."
+                            f"Built bridge toward ({bridge_target.x},{bridge_target.y}); "
+                            f"post_bridge_target={self._post_bridge_target}"
                         ),
                     )
                 else:
-                    # Match old bridge-cycle behavior: wait until bridge placement is possible.
-                    if ct.get_action_cooldown() != 0:
-                        return True
-
-                    affordable_bridge, _, _ = get_cost_affordability(ct, "get_bridge_cost")
-                    if not affordable_bridge:
-                        # Hold position and save for bridge to maintain chain behavior.
-                        self._nav_dbg(ct, "Bridge not affordable; holding instead of moving.")
-                        return True
-
-                    if self._try_attack_underfoot_enemy_road(ct, my_pos):
-                        return True
-
-                    target_is_existing_return_path = self._is_on_friendly_return_path(
-                        ct, bridge_target
-                    )
-                    if (
-                        self._greedy_return_no_join_merge
-                        and target_is_existing_return_path
+                    # Roads/conveyors underfoot can block start tile bridge placement.
+                    if self._clear_underfoot_for_bridge(ct, my_pos) and ct.can_build_bridge(
+                        my_pos, bridge_target
                     ):
-                        self._nav_dbg(
-                            ct,
-                            (
-                                "Greedy return rejected bridge merge target at "
-                                f"({bridge_target.x},{bridge_target.y}); holding."
-                            ),
-                        )
-                        return True
-                    self._clear_underfoot_for_bridge(ct, my_pos)
-
-                    if ct.can_build_bridge(my_pos, bridge_target):
                         ct.build_bridge(my_pos, bridge_target)
-                        if self._is_on_friendly_core(
-                            ct, bridge_target
-                        ) or (
-                            target_is_existing_return_path
-                            and not self._greedy_return_no_join_merge
-                        ):
+                        if self._is_on_friendly_core(ct, bridge_target) or target_is_existing_return_path:
                             self._finish_return_cycle()
                             return True
                         self._post_bridge_target = (bridge_target.x, bridge_target.y)
@@ -314,47 +284,19 @@ class BridgeBuilder:
                         self._nav_dbg(
                             ct,
                             (
-                                f"Built bridge toward ({bridge_target.x},{bridge_target.y}); "
+                                "Built bridge after underfoot clear; "
                                 f"post_bridge_target={self._post_bridge_target}"
                             ),
                         )
                     else:
-                        # Roads/conveyors underfoot can block start tile bridge placement.
-                        if self._clear_underfoot_for_bridge(ct, my_pos) and ct.can_build_bridge(
-                            my_pos, bridge_target
-                        ):
-                            ct.build_bridge(my_pos, bridge_target)
-                            if self._is_on_friendly_core(
-                                ct, bridge_target
-                            ) or (
-                                target_is_existing_return_path
-                                and not self._greedy_return_no_join_merge
-                            ):
-                                self._finish_return_cycle()
-                                return True
-                            self._post_bridge_target = (bridge_target.x, bridge_target.y)
-                            move_target = self._post_bridge_target
-                            self._nav_dbg(
-                                ct,
-                                (
-                                    "Built bridge after underfoot clear; "
-                                    f"post_bridge_target={self._post_bridge_target}"
-                                ),
-                            )
-                        else:
-                            self._nav_dbg(
-                                ct,
-                                (
-                                    f"Cannot build bridge from ({my_pos.x},{my_pos.y}) "
-                                    f"to ({bridge_target.x},{bridge_target.y}); holding."
-                                ),
-                            )
-                            return True
-        else:
-            self._nav_dbg(
-                ct,
-                "Adjacent endpoint shortcut complete; skipping bridge build and resuming nav.",
-            )
+                        self._nav_dbg(
+                            ct,
+                            (
+                                f"Cannot build bridge from ({my_pos.x},{my_pos.y}) "
+                                f"to ({bridge_target.x},{bridge_target.y}); holding."
+                            ),
+                        )
+                        return True
 
         move_dir = self._next_nav_move(
             ct,
@@ -373,164 +315,6 @@ class BridgeBuilder:
             f"Return navigation move_dir={move_dir.name} move_target={move_target}",
         )
         return self._road_then_move(ct, move_dir)
-
-    def _try_build_adjacent_endpoint_conveyor(
-        self,
-        ct: Controller,
-        my_pos: Position,
-    ) -> Literal["none", "handled", "continue_nav", "completed_cycle"]:
-        endpoint_types = (
-            EntityType.BRIDGE,
-            EntityType.CONVEYOR,
-            EntityType.ARMOURED_CONVEYOR,
-        )
-        scan_log_parts: list[str] = []
-        candidates: list[tuple[Direction, Position, EntityType]] = []
-
-        for desired_dir in _CARDINAL_DIRECTIONS:
-            endpoint_pos = my_pos.add(desired_dir)
-            if not (
-                0 <= endpoint_pos.x < ct.get_map_width()
-                and 0 <= endpoint_pos.y < ct.get_map_height()
-            ):
-                scan_log_parts.append(f"{desired_dir.name}:OOB")
-                continue
-
-            endpoint_building_id = ct.get_tile_building_id(endpoint_pos)
-            if endpoint_building_id is None:
-                scan_log_parts.append(
-                    f"{desired_dir.name}:EMPTY@({endpoint_pos.x},{endpoint_pos.y})"
-                )
-                continue
-
-            endpoint_type = ct.get_entity_type(endpoint_building_id)
-            endpoint_team = ct.get_team(endpoint_building_id)
-            try:
-                endpoint_dir = ct.get_direction(endpoint_building_id)
-                endpoint_dir_name = endpoint_dir.name
-            except Exception:
-                endpoint_dir_name = "NA"
-            is_friendly_endpoint = (
-                endpoint_team == ct.get_team() and endpoint_type in endpoint_types
-            )
-            scan_log_parts.append(
-                (
-                    f"{desired_dir.name}:{endpoint_type.name}:"
-                    f"{'ALLY' if endpoint_team == ct.get_team() else 'ENEMY'}:"
-                    f"dir={endpoint_dir_name}:"
-                    f"cand={'Y' if is_friendly_endpoint else 'N'}"
-                )
-            )
-            if is_friendly_endpoint:
-                candidates.append((desired_dir, endpoint_pos, endpoint_type))
-
-        self._nav_dbg(
-            ct,
-            (
-                "Adjacent endpoint scan "
-                f"from=({my_pos.x},{my_pos.y}) "
-                f"results=[{', '.join(scan_log_parts)}]"
-            ),
-        )
-
-        if not candidates:
-            return "none"
-
-        desired_dir, endpoint_pos, endpoint_type = candidates[0]
-        self._nav_dbg(
-            ct,
-            (
-                "Adjacent endpoint shortcut selected "
-                f"dir={desired_dir.name} endpoint=({endpoint_pos.x},{endpoint_pos.y}) "
-                f"type={endpoint_type.name}"
-            ),
-        )
-
-        my_building_id = ct.get_tile_building_id(my_pos)
-        if my_building_id is not None and ct.get_team(my_building_id) == ct.get_team():
-            my_building_type = ct.get_entity_type(my_building_id)
-            if my_building_type in (
-                EntityType.CONVEYOR,
-                EntityType.ARMOURED_CONVEYOR,
-            ):
-                try:
-                    if ct.get_direction(my_building_id) == desired_dir:
-                        self._nav_dbg(
-                            ct,
-                            (
-                                "Adjacent endpoint conveyor shortcut already satisfied "
-                                f"at ({my_pos.x},{my_pos.y}) facing {desired_dir.name}; "
-                                "continuing normal return behavior."
-                            ),
-                        )
-                        return "continue_nav"
-                except Exception:
-                    pass
-
-        affordable_conveyor, _, _ = get_cost_affordability(ct, "get_conveyor_cost")
-        if not affordable_conveyor:
-            self._nav_dbg(
-                ct,
-                (
-                    "Adjacent endpoint conveyor shortcut waiting for resources "
-                    f"facing {desired_dir.name}."
-                ),
-            )
-            return "handled"
-
-        if ct.get_action_cooldown() != 0:
-            self._nav_dbg(
-                ct,
-                (
-                    "Adjacent endpoint conveyor shortcut waiting for action cooldown "
-                    f"action_cd={ct.get_action_cooldown()} facing {desired_dir.name}."
-                ),
-            )
-            return "handled"
-
-        if ct.can_build_conveyor(my_pos, desired_dir):
-            ct.build_conveyor(my_pos, desired_dir)
-            self._nav_dbg(
-                ct,
-                (
-                    "Built adjacent endpoint conveyor shortcut "
-                    f"at ({my_pos.x},{my_pos.y}) facing {desired_dir.name} "
-                    f"toward ({endpoint_pos.x},{endpoint_pos.y}) type={endpoint_type.name}."
-                ),
-            )
-            return "completed_cycle"
-
-        acted = False
-        my_building_id = ct.get_tile_building_id(my_pos)
-        if my_building_id is not None:
-            my_building_type = ct.get_entity_type(my_building_id)
-            if my_building_type != EntityType.CORE and ct.can_destroy(my_pos):
-                ct.destroy(my_pos)
-                acted = True
-
-        if BridgeBuilder._has_friendly_marker_at(ct, my_pos) and ct.can_destroy(my_pos):
-            ct.destroy(my_pos)
-            acted = True
-
-        if acted:
-            self._nav_dbg(
-                ct,
-                (
-                    "Cleared underfoot blocker for adjacent endpoint conveyor shortcut "
-                    f"at ({my_pos.x},{my_pos.y}); retrying next turn."
-                ),
-            )
-            return "handled"
-
-        self._nav_dbg(
-            ct,
-            (
-                "Adjacent endpoint exists but cannot build conveyor this turn "
-                f"at ({my_pos.x},{my_pos.y}) facing {desired_dir.name}; "
-                "holding to preserve shortcut priority."
-            ),
-        )
-        return "handled"
 
     def _run_center_exploration(self, ct: Controller) -> bool:
         target = (ct.get_map_width() // 2, ct.get_map_height() // 2)
@@ -586,39 +370,21 @@ class BridgeBuilder:
         visible: set[tuple[int, int]] = set()
         map_history = getattr(symmetry_analyzer, "map_history", None)
         if isinstance(map_history, dict):
-            known_ore_tiles = 0
             for (x, y), env in map_history.items():
                 if env not in ORE_ENVS:
                     continue
-                known_ore_tiles += 1
                 ore_pos = Position(x, y)
                 if ct.is_in_vision(ore_pos):
                     visible.add((x, y))
-            self._nav_dbg(
-                ct,
-                (
-                    "Ore scan via map_history "
-                    f"known_ore_tiles={known_ore_tiles} visible_now={len(visible)}"
-                ),
-            )
             return visible
 
-        nearby_tiles = 0
         for tile in ct.get_nearby_tiles():
-            nearby_tiles += 1
             try:
                 env = ct.get_tile_env(tile)
             except Exception:
                 continue
             if env in ORE_ENVS:
                 visible.add((tile.x, tile.y))
-        self._nav_dbg(
-            ct,
-            (
-                "Ore scan via nearby tiles "
-                f"nearby_count={nearby_tiles} visible_now={len(visible)}"
-            ),
-        )
         return visible
 
     def _select_reachable_ore(
@@ -630,52 +396,21 @@ class BridgeBuilder:
     ) -> tuple[int, int] | None:
         best_target: tuple[int, int] | None = None
         best_dist_sq: int | None = None
-        self._nav_dbg(
-            ct,
-            (
-                f"Ore selection start visible_count={len(visible_ores)} "
-                f"from=({my_pos.x},{my_pos.y})"
-            ),
-        )
         for ox, oy in visible_ores:
-            self._nav_dbg(ct, f"Evaluating ore candidate ({ox},{oy})")
             if self._is_ore_blacklisted(ct, (ox, oy)):
                 self._nav_dbg(ct, f"Skipping blacklisted ore ({ox},{oy}).")
                 continue
             ore_pos = Position(ox, oy)
             if self._ore_has_completed_extractor(ct, ore_pos):
-                self._nav_dbg(
-                    ct,
-                    f"Rejecting ore ({ox},{oy}) reason=completed_extractor_present",
-                )
                 continue
-            blocking_type = self._ore_blocking_structure_type(ct, ore_pos)
-            if blocking_type is not None:
-                self._nav_dbg(
-                    ct,
-                    f"Rejecting ore ({ox},{oy}) reason=blocked_by_{blocking_type}",
-                )
+            if self._ore_blocking_structure_type(ct, ore_pos) is not None:
                 continue
-            has_step = self._has_nav_step_to_ore(ct, ore_pos, map_history)
-            if not has_step:
-                self._nav_dbg(ct, f"Rejecting ore ({ox},{oy}) reason=no_nav_step")
+            if not self._has_nav_step_to_ore(ct, ore_pos, map_history):
                 continue
             dist_sq = (my_pos.x - ox) ** 2 + (my_pos.y - oy) ** 2
-            self._nav_dbg(
-                ct,
-                f"Ore candidate ({ox},{oy}) accepted dist_sq={dist_sq}",
-            )
             if best_dist_sq is None or dist_sq < best_dist_sq:
                 best_dist_sq = dist_sq
                 best_target = (ox, oy)
-                self._nav_dbg(
-                    ct,
-                    f"Ore candidate ({ox},{oy}) is new best dist_sq={best_dist_sq}",
-                )
-        self._nav_dbg(
-            ct,
-            f"Ore selection result best_target={best_target} best_dist_sq={best_dist_sq}",
-        )
         return best_target
 
     def _has_nav_step_to_ore(
@@ -731,26 +466,11 @@ class BridgeBuilder:
             return "built"
         return "blocked"
 
-    def _roll_post_harvester_return_mode(self, ct: Controller) -> None:
-        chance_percent = max(0, min(100, POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT))
-        roll = random.randrange(100)
-        self._greedy_return_no_join_merge = roll < chance_percent
-        self._nav_dbg(
-            ct,
-            (
-                "Post-harvester return mode roll "
-                f"chance={chance_percent}% roll={roll} "
-                f"greedy_no_join_merge={self._greedy_return_no_join_merge}"
-            ),
-        )
-
     def _select_bridge_target_toward_core(
         self,
         ct: Controller,
         start_pos: Position,
         core_pos: tuple[int, int],
-        allow_chain_join: bool = True,
-        allow_merge_with_existing_return_path: bool = True,
     ) -> Position | None:
         core = Position(core_pos[0], core_pos[1])
         candidates: list[Position] = []
@@ -767,25 +487,6 @@ class BridgeBuilder:
                 candidates.append(pos)
         if not candidates:
             return None
-
-        if allow_chain_join:
-            join_target = self._select_nearest_visible_friendly_chain_target(
-                ct=ct,
-                start_pos=start_pos,
-                core=core,
-                candidates=candidates,
-            )
-            if join_target is not None:
-                self._nav_dbg(
-                    ct,
-                    (
-                        "Selected nearby friendly chain join target "
-                        f"({join_target.x},{join_target.y}) from start "
-                        f"({start_pos.x},{start_pos.y})"
-                    ),
-                )
-                return join_target
-
         candidates.sort(
             key=lambda p: (
                 p.distance_squared(core),
@@ -795,84 +496,15 @@ class BridgeBuilder:
             )
         )
         for cand in candidates:
-            if self._is_valid_bridge_target_tile(
-                ct,
-                cand,
-                allow_merge_with_existing_return_path=(
-                    allow_merge_with_existing_return_path
-                ),
-            ):
+            if self._is_valid_bridge_target_tile(ct, cand):
                 return cand
         return None
 
-    def _select_nearest_visible_friendly_chain_target(
-            self,
-            ct: Controller,
-            start_pos: Position,
-            core: Position,
-            candidates: list[Position],
-        ) -> Position | None:
-            chain_candidates: list[tuple[int, int, int, int, Position]] = []
-            start_dist_to_core = start_pos.distance_squared(core)
-
-            for cand in candidates:
-                if not ct.is_in_vision(cand):
-                    continue
-                try:
-                    building_id = ct.get_tile_building_id(cand)
-                except Exception:
-                    continue
-                if building_id is None:
-                    continue
-                if ct.get_team(building_id) != ct.get_team():
-                    continue
-                if ct.get_entity_type(building_id) not in (
-                    EntityType.BRIDGE,
-                    EntityType.CONVEYOR,
-                    EntityType.ARMOURED_CONVEYOR,
-                ):
-                    continue
-                if not self._is_valid_bridge_target_tile(ct, cand):
-                    continue
-                    
-                cand_dist_to_core = cand.distance_squared(core)
-                
-                # Prevent pointing backwards: only connect if it brings us closer to the core
-                if cand_dist_to_core >= start_dist_to_core:
-                    continue
-
-                chain_candidates.append(
-                    (
-                        start_pos.distance_squared(cand),
-                        cand_dist_to_core,
-                        cand.x,
-                        cand.y,
-                        cand,
-                    )
-                )
-
-            if not chain_candidates:
-                return None
-                
-            # Prioritize progress to core (c[1]) over immediate proximity to bot (c[0])
-            chain_candidates.sort(key=lambda c: (c[1], c[0], c[2], c[3]))
-            return chain_candidates[0][4]
-
-    def _is_valid_bridge_target_tile(
-        self,
-        ct: Controller,
-        pos: Position,
-        allow_merge_with_existing_return_path: bool = True,
-    ) -> bool:
+    def _is_valid_bridge_target_tile(self, ct: Controller, pos: Position) -> bool:
         if self._is_diagonal_adjacent_to_extractor(ct, pos):
             return False
         if self._is_on_friendly_core(ct, pos):
             return True
-        if (
-            not allow_merge_with_existing_return_path
-            and self._is_on_friendly_return_path(ct, pos)
-        ):
-            return False
         building_id = ct.get_tile_building_id(pos)
         if building_id is not None:
             return ct.get_entity_type(building_id) in _PASSABLE_BUILDINGS
@@ -890,13 +522,9 @@ class BridgeBuilder:
         if generator_type is not None:
             extractor_types.add(generator_type)
 
-        width = ct.get_map_width()
-        height = ct.get_map_height()
         diagonals = ((1, 1), (1, -1), (-1, 1), (-1, -1))
         for dx, dy in diagonals:
             check = Position(pos.x + dx, pos.y + dy)
-            if not (0 <= check.x < width and 0 <= check.y < height):
-                continue
             if not ct.is_in_vision(check):
                 continue
             building_id = ct.get_tile_building_id(check)
@@ -920,7 +548,6 @@ class BridgeBuilder:
         self._post_bridge_target = None
         self._return_nav_target = None
         self._return_nav = TangentNav()
-        self._greedy_return_no_join_merge = False
 
     @staticmethod
     def _is_on_friendly_return_path(ct: Controller, pos: Position) -> bool:

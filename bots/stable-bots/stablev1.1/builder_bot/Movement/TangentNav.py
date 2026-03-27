@@ -57,7 +57,7 @@ _PROBE_DIRS: dict[tuple[Direction, bool], tuple[Direction, ...]] = _build_probe_
 class TangentNav:
     _RECENT_WINDOW = 8
     _MAX_BOUNDARY_STEPS = 300
-    _DEBUG = False
+    _DEBUG = True
     _DEBUG_UNIT_ID = 3
     # Movement debug window [N, M]. Update these when _DEBUG is True.
     _DEBUG_START_ROUND = 200
