@@ -53,9 +53,10 @@ class Turret:
                 ct.draw_indicator_line(trace[i],trace[i+1],255,0,0)
 
             if my_pos.distance_squared(pos) <= 2:
-                ct.launch(pos,self.enter[bot])
-                ct.draw_indicator_dot(trace[0],0,0,255)
-                ct.draw_indicator_dot(self.enter[bot],0,255,0)
+                if ct.can_launch(pos,self.enter[bot]):
+                    ct.launch(pos,self.enter[bot])
+                    ct.draw_indicator_dot(trace[0],0,0,255)
+                    ct.draw_indicator_dot(self.enter[bot],0,255,0)
             
 
     def turret(self,ct:Controller):
