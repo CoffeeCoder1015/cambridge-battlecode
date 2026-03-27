@@ -75,7 +75,7 @@ class TangentBug:
     """
 
     _RECENT_WINDOW = 8
-    _MAX_BOUNDARY_STEPS = 40
+    _MAX_BOUNDARY_STEPS = 200
     _NEAR_TRAIL_REPULSE_COST = 70
     _DOUBLE_STEP_REPULSE_COST = 20_000
     _RECENT_TILE_PENALTY = 32
@@ -103,11 +103,14 @@ class TangentBug:
         self._loop_repulse: dict[tuple[int, int], int] = {}
         self._pcache: dict[tuple[int, int], int] = {}
         self._bounce_dir: Direction | None = None
+        self._bounce_attempts: int = 0
+        self._best_dist_sq: int = 0
 
     def attach_terrain_memory(
         self, map_history: dict[tuple[int, int], Environment] | None
     ) -> None:
         self._terrain = map_history
+        self._pcache.clear()
 
     def set_target(self, tx: int, ty: int) -> None:
         if self.target == (tx, ty):
@@ -148,6 +151,7 @@ class TangentBug:
             blocked = self._bounce_dir
             if self._tile_state(ct, cur.add(blocked)) == 0:
                 self._bounce_dir = None
+                self._bounce_attempts = 0
             else:
                 opposite = blocked.opposite()
                 valid_dirs = [
@@ -158,8 +162,14 @@ class TangentBug:
                     and self._tile_state(ct, cur.add(d)) == 0
                 ]
                 if valid_dirs:
-                    return random.choice(valid_dirs)
+                    self._bounce_attempts += 1
+                    if self._bounce_attempts > 3:
+                        self._bounce_dir = None
+                        self._bounce_attempts = 0
+                    else:
+                        return random.choice(valid_dirs)
                 self._bounce_dir = None
+                self._bounce_attempts = 0
 
         if self._mode == "direct":
             return self._direct_step(ct, cur, target_pos)
@@ -171,12 +181,14 @@ class TangentBug:
         self._follow_right = True
         self._hit_pos = None
         self._hit_dist_sq = 0
+        self._best_dist_sq = 0
         self._side_switched = False
         self._boundary_steps = 0
         self._boundary_seen.clear()
         self._last_boundary_pos = None
         self._recent.clear()
         self._bounce_dir = None
+        self._bounce_attempts = 0
         if clear_run_memory:
             self._visit_counts.clear()
             self._trail_repulse.clear()
@@ -265,10 +277,33 @@ class TangentBug:
             ]
             if valid_dirs:
                 self._bounce_dir = blocked
+                self._bounce_attempts += 1
+                if self._bounce_attempts > 3:
+                    self._bounce_dir = None
+                    self._bounce_attempts = 0
+                    self._enter_boundary(ct, cur, target, best_dir)
+                    return self._boundary_step(ct, cur, target)
                 return random.choice(valid_dirs)
+            self._bounce_dir = None
+            self._bounce_attempts = 0
+
+        # Fallback: if no progress possible, try ANY valid direction
+        fallback_result = self._direct_step_fallback(ct, cur, target)
+        if fallback_result is not None:
+            return fallback_result
 
         self._enter_boundary(ct, cur, target, best_dir)
         return self._boundary_step(ct, cur, target)
+
+    def _direct_step_fallback(
+        self, ct: Controller, cur: Position, target: Position
+    ) -> Direction | None:
+        for d in _ALL_DIRS:
+            nxt = cur.add(d)
+            nxt_coords = (nxt.x, nxt.y)
+            if self._tile_state(ct, nxt) == 0 and nxt_coords not in self._blacklist:
+                return d
+        return None
 
     def _enter_boundary(
         self,
@@ -281,11 +316,13 @@ class TangentBug:
         self._wall_dir = blocked_dir
         self._hit_pos = (cur.x, cur.y)
         self._hit_dist_sq = cur.distance_squared(target)
+        self._best_dist_sq = cur.distance_squared(target)
         self._side_switched = False
         self._boundary_steps = 0
         self._boundary_seen.clear()
         self._last_boundary_pos = None
         self._bounce_dir = None
+        self._bounce_attempts = 0
         self._follow_right = self._pick_side(ct, cur, target, blocked_dir)
 
     def _pick_side(
@@ -336,9 +373,10 @@ class TangentBug:
             return self._recover(ct, cur, target)
 
         curr_dist_sq = cur.distance_squared(target)
+        self._best_dist_sq = min(self._best_dist_sq, curr_dist_sq)
         if (
             coords != self._hit_pos
-            and curr_dist_sq < self._hit_dist_sq
+            and curr_dist_sq < self._best_dist_sq
             and self._is_on_m_line(cur.x, cur.y)
         ):
             self._mode = "direct"
@@ -365,7 +403,8 @@ class TangentBug:
             self._wall_dir = best_dir
             return best_dir
         if saw_soft:
-            return None
+            # Instead of returning None (freezing), try any valid direction
+            return self._direct_step_fallback(ct, cur, target)
         return self._recover(ct, cur, target)
 
     def _recover(
@@ -391,9 +430,15 @@ class TangentBug:
 
         self._blacklist[(cur.x, cur.y)] = ct.get_current_round() + 10
         self._reset()
-        best = cur.direction_to(target)
-        for d in _SORTED_DIRS[best]:
-            if self._tile_state(ct, cur.add(d)) == 0:
+
+        # Force at least some movement - pick closest valid direction
+        fallback = self._direct_step_fallback(ct, cur, target)
+        if fallback is not None:
+            return fallback
+
+        # Last resort: try any direction at all
+        for d in _ALL_DIRS:
+            if self._tile_state(ct, cur.add(d)) != 2:
                 return d
         return None
 
