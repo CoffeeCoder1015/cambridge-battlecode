@@ -149,13 +149,25 @@ class Navigation:
             next_pos = self.current_pos.add(m_dir)
             if ct.can_move(m_dir) and self.get_lut(*next_pos) == 0:
                 ct.move(m_dir)
-                return
+                return True
             elif ct.can_build_road(next_pos):
                 ct.build_road(next_pos)
                 ct.move(m_dir)
-                return
+                return True
             else:
                 m_dir = m_dir.rotate_left()
+        for _ in range(8):
+            next_pos = self.current_pos.add(m_dir)
+            if ct.can_move(m_dir):
+                ct.move(m_dir)
+                return True
+            elif ct.can_build_road(next_pos):
+                ct.build_road(next_pos)
+                ct.move(m_dir)
+                return True
+            else:
+                m_dir = m_dir.rotate_right()
+        return False
 
     def get_neighbors(self):
         quads = [
