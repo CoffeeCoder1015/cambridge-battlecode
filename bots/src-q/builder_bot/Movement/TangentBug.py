@@ -75,7 +75,7 @@ class TangentBug:
     """
 
     _RECENT_WINDOW = 8
-    _MAX_BOUNDARY_STEPS = 300
+    _MAX_BOUNDARY_STEPS = 40
     _NEAR_TRAIL_REPULSE_COST = 70
     _DOUBLE_STEP_REPULSE_COST = 20_000
     _RECENT_TILE_PENALTY = 32
@@ -285,6 +285,7 @@ class TangentBug:
         self._boundary_steps = 0
         self._boundary_seen.clear()
         self._last_boundary_pos = None
+        self._bounce_dir = None
         self._follow_right = self._pick_side(ct, cur, target, blocked_dir)
 
     def _pick_side(
