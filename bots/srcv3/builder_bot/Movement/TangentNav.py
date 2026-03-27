@@ -2,7 +2,6 @@
 Bug2-style navigator for builder bots with enhanced recovery and blacklisting.
 """
 
-import math
 import sys
 from collections import deque
 
@@ -59,6 +58,8 @@ class TangentNav:
     _RECENT_WINDOW = 8
     _MAX_BOUNDARY_STEPS = 300
     _DEBUG_MAX_ROUND = 300
+    _DOUBLE_STEP_REPULSE_COST = 20_000
+    _RECENT_TILE_PENALTY = 32
     # Reduced epsilon to prevent premature M-line exits in tight corridors
     _M_LINE_EPS = 0.5
 
@@ -79,7 +80,9 @@ class TangentNav:
 
         self._recent: deque[tuple[int, int]] = deque(maxlen=self._RECENT_WINDOW)
         # Prevents re-entering the same trap immediately after a reset
-        self._blacklist: dict[tuple[int, int], int] = {} 
+        self._blacklist: dict[tuple[int, int], int] = {}
+        self._visit_counts: dict[tuple[int, int], int] = {}
+        self._loop_repulse: dict[tuple[int, int], int] = {}
         self._pcache: dict[tuple[int, int], int] = {}
 
     def attach_terrain_memory(
@@ -92,7 +95,7 @@ class TangentNav:
             return
         self.target = (tx, ty)
         self._start = (cur_x, cur_y)
-        self._reset()
+        self._reset(clear_run_memory=True)
 
     def next_move(self, ct: Controller) -> Direction | None:
         if self.target is None:
@@ -108,6 +111,7 @@ class TangentNav:
         coords = (cur.x, cur.y)
         if not self._recent or self._recent[-1] != coords:
             self._recent.append(coords)
+            self._record_step(coords)
 
         # Cleanup expired blacklist items
         curr_round = ct.get_current_round()
@@ -119,7 +123,7 @@ class TangentNav:
             return self._direct_step(ct, cur, target_pos)
         return self._boundary_step(ct, cur, target_pos)
 
-    def _reset(self) -> None:
+    def _reset(self, *, clear_run_memory: bool = False) -> None:
         self._mode = "direct"
         self._wall_dir = None
         self._follow_right = True
@@ -130,6 +134,27 @@ class TangentNav:
         self._boundary_seen.clear()
         self._last_boundary_pos = None
         self._recent.clear()
+        if clear_run_memory:
+            self._visit_counts.clear()
+            self._loop_repulse.clear()
+
+    def _record_step(self, coords: tuple[int, int]) -> None:
+        count = self._visit_counts.get(coords, 0) + 1
+        self._visit_counts[coords] = count
+        if count == 2:
+            cx, cy = coords
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    region = (cx + dx, cy + dy)
+                    self._loop_repulse[region] = self._loop_repulse.get(region, 0) + 1
+
+    def _movement_score(self, nxt: Position, target: Position) -> int:
+        coords = (nxt.x, nxt.y)
+        score = nxt.distance_squared(target)
+        score += self._loop_repulse.get(coords, 0) * self._DOUBLE_STEP_REPULSE_COST
+        if coords in self._recent:
+            score += self._RECENT_TILE_PENALTY
+        return score
 
     def _is_on_m_line(self, x: int, y: int) -> bool:
         if self._start is None or self.target is None:
@@ -149,25 +174,30 @@ class TangentNav:
         best_dir = cur.direction_to(target)
         dirs = _SORTED_DIRS[best_dir]
         cur_dist_sq = cur.distance_squared(target)
-        curr_round = ct.get_current_round()
+        best_fresh: Direction | None = None
+        best_fresh_score = 10**12
+        best_progress: Direction | None = None
+        best_progress_score = 10**12
 
-        for d in dirs:
+        for i, d in enumerate(dirs):
             nxt = cur.add(d)
             nxt_coords = (nxt.x, nxt.y)
             if self._tile_state(ct, nxt) != 0 or nxt_coords in self._blacklist:
                 continue
-            if (
-                nxt.distance_squared(target) < cur_dist_sq
-                and nxt_coords not in self._recent
-            ):
-                return d
-
-        for d in dirs:
-            nxt = cur.add(d)
-            if self._tile_state(ct, nxt) != 0 or (nxt.x, nxt.y) in self._blacklist:
+            if nxt.distance_squared(target) >= cur_dist_sq:
                 continue
-            if nxt.distance_squared(target) < cur_dist_sq:
-                return d
+            score = self._movement_score(nxt, target) + i
+            if nxt_coords not in self._recent and score < best_fresh_score:
+                best_fresh = d
+                best_fresh_score = score
+            if score < best_progress_score:
+                best_progress = d
+                best_progress_score = score
+
+        if best_fresh is not None:
+            return best_fresh
+        if best_progress is not None:
+            return best_progress
 
         ideal_state = self._tile_state(ct, cur.add(best_dir))
         if ideal_state == 1:
@@ -210,10 +240,9 @@ class TangentNav:
         )
         if right_d is None: return False
         if left_d is None: return True
-        return (
-            cur.add(right_d).distance_squared(target)
-            <= cur.add(left_d).distance_squared(target)
-        )
+        right_score = self._movement_score(cur.add(right_d), target)
+        left_score = self._movement_score(cur.add(left_d), target)
+        return right_score <= left_score
 
     def _boundary_step(
         self, ct: Controller, cur: Position, target: Position
@@ -242,15 +271,22 @@ class TangentNav:
 
         base = self._wall_dir if self._wall_dir is not None else cur.direction_to(target)
         saw_soft = False
-        for d in _PROBE_DIRS[(base, self._follow_right)]:
+        best_dir: Direction | None = None
+        best_score = 10**12
+        for i, d in enumerate(_PROBE_DIRS[(base, self._follow_right)]):
             nxt = cur.add(d)
             state = self._tile_state(ct, nxt)
             if state == 0:
-                self._wall_dir = d
-                return d
+                score = self._movement_score(nxt, target) + i
+                if score < best_score:
+                    best_score = score
+                    best_dir = d
             if state == 1:
                 saw_soft = True
 
+        if best_dir is not None:
+            self._wall_dir = best_dir
+            return best_dir
         if saw_soft: return None
         return self._recover(ct, cur, target)
 
