@@ -762,6 +762,7 @@ class BridgeBuilder:
                     b_type = ct.get_entity_type(b_id)
                     if b_type not in (
                         EntityType.ROAD,
+                        EntityType.BRIDGE,
                         EntityType.CORE,
                         EntityType.CONVEYOR,
                         EntityType.ARMOURED_CONVEYOR,
