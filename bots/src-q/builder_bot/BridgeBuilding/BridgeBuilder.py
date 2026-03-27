@@ -32,6 +32,7 @@ class BridgeBuilder:
         self._post_bridge_nav = TangentBug()
         self._fallback_nav_target: tuple[int, int] | None = None
         self._fallback_nav = TangentBug()
+        self._launcher_pending_pos: Position | None = None
 
     def main(
         self,
@@ -54,6 +55,9 @@ class BridgeBuilder:
                 f"resume_random={self._resume_random_after_bridge}"
             ),
         )
+
+        if self._handle_pending_launcher(ct):
+            return True
 
         if self._post_build_align_ore_target is not None:
             self._log(ct, "continuing post-build cardinal alignment")
@@ -540,6 +544,7 @@ class BridgeBuilder:
                 self._finish_bridge_cycle_to_existing_return_path(ct, target_pos)
                 return True
             self._post_generator_bridge_pending = False
+            self._launcher_pending_pos = start_pos
             self._start_post_bridge_navigation(target_pos)
             self._log(ct, "starting TangentBug movement toward bridge target")
             self._advance_post_bridge_navigation(ct, core_pos)
@@ -561,6 +566,7 @@ class BridgeBuilder:
                     self._finish_bridge_cycle_to_existing_return_path(ct, target_pos)
                     return True
                 self._post_generator_bridge_pending = False
+                self._launcher_pending_pos = start_pos
                 self._start_post_bridge_navigation(target_pos)
                 self._log(ct, "starting TangentBug movement toward bridge target")
                 self._advance_post_bridge_navigation(ct, core_pos)
@@ -773,6 +779,87 @@ class BridgeBuilder:
             return True
 
         return False
+
+    def _handle_pending_launcher(self, ct: Controller) -> bool:
+        if self._launcher_pending_pos is None:
+            return False
+
+        # Check affordability and cooldown
+        affordable, cost, resources = get_cost_affordability(ct, "get_launcher_cost")
+        if not affordable:
+            self._log(
+                ct,
+                f"waiting for resources to build defensive launcher; need={cost}, have={resources}",
+            )
+            return True
+
+        if ct.get_action_cooldown() != 0:
+            self._log(ct, "waiting for cooldown to build defensive launcher")
+            return True
+
+        # Find a suitable adjacent tile
+        my_pos = ct.get_position()
+        best_spot = None
+        
+        # Check all 8 neighbors around the bridge
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                if dx == 0 and dy == 0:
+                    continue
+                neighbor = Position(self._launcher_pending_pos.x + dx, self._launcher_pending_pos.y + dy)
+                
+                # Must be in bounds
+                if not (0 <= neighbor.x < ct.get_map_width() and 0 <= neighbor.y < ct.get_map_height()):
+                    continue
+                
+                # Check distance from current bot position (must be within action radius)
+                dist_sq = (my_pos.x - neighbor.x)**2 + (my_pos.y - neighbor.y)**2
+                if dist_sq > 2:
+                    continue
+                
+                # Check tile type
+                try:
+                    env = ct.get_tile_env(neighbor)
+                    if env != Environment.EMPTY:
+                        continue
+                    
+                    b_id = ct.get_tile_building_id(neighbor)
+                    if b_id is not None:
+                        # Only allow replacing roads or markers
+                        b_type = ct.get_entity_type(b_id)
+                        if b_type not in (EntityType.ROAD, EntityType.MARKER):
+                            continue
+                        
+                        # Only destroy friendly roads/markers to make room
+                        if ct.get_team(b_id) != ct.get_team():
+                            continue
+                except Exception:
+                    continue
+                
+                # Found a potential spot
+                best_spot = neighbor
+                break
+            if best_spot:
+                break
+
+        if best_spot:
+            # Clear spot if needed
+            b_id = ct.get_tile_building_id(best_spot)
+            if b_id is not None and ct.can_destroy(best_spot):
+                ct.destroy(best_spot)
+                self._log(ct, f"cleared friendly road/marker at ({best_spot.x},{best_spot.y}) for launcher")
+            
+            if ct.can_build_launcher(best_spot):
+                ct.build_launcher(best_spot)
+                self._log(ct, f"built defensive launcher at ({best_spot.x},{best_spot.y}) for bridge at ({self._launcher_pending_pos.x},{self._launcher_pending_pos.y})")
+                self._launcher_pending_pos = None
+                return True
+        else:
+            self._log(ct, f"no suitable spot for defensive launcher next to ({self._launcher_pending_pos.x},{self._launcher_pending_pos.y}), skipping")
+            self._launcher_pending_pos = None
+            return False
+
+        return True
 
     def _clear_post_bridge_state(self) -> None:
         self._post_generator_bridge_pending = False
