@@ -20,6 +20,7 @@ _CARDINAL_DIRECTIONS = (
     Direction.SOUTH,
     Direction.WEST,
 )
+_ORE_TARGET_BLACKLIST_ROUNDS = 80
 
 Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
@@ -42,6 +43,10 @@ class BridgeBuilder:
         self._return_nav = TangentNav()
         self._return_nav_target: tuple[int, int] | None = None
         self._post_bridge_target: tuple[int, int] | None = None
+        self._diag_align_nav = TangentNav()
+        self._diag_align_nav_target: tuple[int, int] | None = None
+        self._diag_align_ore_target: tuple[int, int] | None = None
+        self._ore_blacklist: dict[tuple[int, int], int] = {}
 
     def run(
         self,
@@ -56,13 +61,17 @@ class BridgeBuilder:
                 f"Tick phase={self.agent_phase} pos=({my_pos.x},{my_pos.y}) "
                 f"ore_target={self.ore_target} ore_nav_target={self._ore_nav_target} "
                 f"return_nav_target={self._return_nav_target} "
-                f"post_bridge_target={self._post_bridge_target}"
+                f"post_bridge_target={self._post_bridge_target} "
+                f"diag_align_target={self._diag_align_nav_target} "
+                f"ore_blacklist={len(self._ore_blacklist)}"
             ),
         )
         map_history = getattr(symmetry_analyzer, "map_history", None)
         if isinstance(map_history, dict):
             self._ore_nav.attach_terrain_memory(map_history)
             self._return_nav.attach_terrain_memory(map_history)
+            self._diag_align_nav.attach_terrain_memory(map_history)
+        self._cleanup_ore_blacklist(ct)
 
         if self.agent_phase == "RETURN_CORE":
             return self._run_return_core(ct, core_pos)
@@ -77,24 +86,28 @@ class BridgeBuilder:
         )
 
         if self.ore_target is not None:
-            ore_pos = Position(self.ore_target[0], self.ore_target[1])
-            
-            # Only evaluate conditions if the target is ACTUALLY in vision
-            if ct.is_in_vision(ore_pos):
-                completed_extractor = self._ore_has_completed_extractor(ct, ore_pos)
-                blocked_type = self._ore_blocking_structure_type(ct, ore_pos)
-                
-                if completed_extractor or blocked_type is not None:
-                    self._nav_dbg(
-                        ct,
-                        (
-                            "Clearing ore target "
-                            f"{self.ore_target}: "
-                            f"completed_extractor={completed_extractor} "
-                            f"blocked_type={blocked_type}"
-                        ),
-                    )
-                    self._clear_ore_target()
+            if self._is_ore_blacklisted(ct, self.ore_target):
+                self._nav_dbg(ct, f"Clearing blacklisted ore target {self.ore_target}.")
+                self._clear_ore_target()
+            else:
+                ore_pos = Position(self.ore_target[0], self.ore_target[1])
+
+                # Only evaluate conditions if the target is ACTUALLY in vision
+                if ct.is_in_vision(ore_pos):
+                    completed_extractor = self._ore_has_completed_extractor(ct, ore_pos)
+                    blocked_type = self._ore_blocking_structure_type(ct, ore_pos)
+
+                    if completed_extractor or blocked_type is not None:
+                        self._nav_dbg(
+                            ct,
+                            (
+                                "Clearing ore target "
+                                f"{self.ore_target}: "
+                                f"completed_extractor={completed_extractor} "
+                                f"blocked_type={blocked_type}"
+                            ),
+                        )
+                        self._clear_ore_target()
 
         if self.ore_target is None:
             self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores, map_history)
@@ -105,6 +118,12 @@ class BridgeBuilder:
             return self._run_center_exploration(ct)
 
         ore_pos = Position(self.ore_target[0], self.ore_target[1])
+        if self._should_run_diagonal_ore_alignment(my_pos, ore_pos):
+            if self._run_diagonal_ore_alignment(ct, ore_pos):
+                return True
+        else:
+            self._clear_diagonal_alignment_state()
+
         if self._in_action_radius(my_pos, ore_pos):
             # Avoid diagonal extractor placement attempts; bridge/conveyor follow-up
             # requires clean NEWS adjacency around the extractor tile.
@@ -372,6 +391,9 @@ class BridgeBuilder:
         best_target: tuple[int, int] | None = None
         best_dist_sq: int | None = None
         for ox, oy in visible_ores:
+            if self._is_ore_blacklisted(ct, (ox, oy)):
+                self._nav_dbg(ct, f"Skipping blacklisted ore ({ox},{oy}).")
+                continue
             ore_pos = Position(ox, oy)
             if self._ore_has_completed_extractor(ct, ore_pos):
                 continue
@@ -796,10 +818,155 @@ class BridgeBuilder:
     def _is_adjacent_cardinal(a: Position, b: Position) -> bool:
         return abs(a.x - b.x) + abs(a.y - b.y) == 1
 
+    @staticmethod
+    def _is_adjacent_diagonal(a: Position, b: Position) -> bool:
+        return abs(a.x - b.x) == 1 and abs(a.y - b.y) == 1
+
+    def _should_run_diagonal_ore_alignment(self, my_pos: Position, ore_pos: Position) -> bool:
+        ore_target = (ore_pos.x, ore_pos.y)
+        if self._is_adjacent_diagonal(my_pos, ore_pos):
+            return True
+        if self._diag_align_ore_target != ore_target:
+            return False
+        return not self._is_adjacent_cardinal(my_pos, ore_pos)
+
+    def _run_diagonal_ore_alignment(self, ct: Controller, ore_pos: Position) -> bool:
+        my_pos = ct.get_position()
+        ore_target = (ore_pos.x, ore_pos.y)
+        if self._diag_align_ore_target != ore_target:
+            self._diag_align_ore_target = ore_target
+            self._diag_align_nav_target = None
+            self._diag_align_nav = TangentNav()
+
+        if self._is_adjacent_cardinal(my_pos, ore_pos):
+            self._clear_diagonal_alignment_state()
+            return False
+
+        open_tiles = self._open_cardinal_ore_tiles_in_vision(ct, ore_pos)
+        if not open_tiles:
+            self._blacklist_current_ore(
+                ct,
+                reason=(
+                    "diagonal ore alignment found no open cardinal ore-adjacent tiles "
+                    "in vision"
+                ),
+            )
+            return True
+
+        targets = sorted(
+            open_tiles,
+            key=lambda tile: (
+                (my_pos.x - tile[0]) ** 2 + (my_pos.y - tile[1]) ** 2,
+                tile[0],
+                tile[1],
+            ),
+        )
+        if self._diag_align_nav_target in open_tiles:
+            preferred = self._diag_align_nav_target
+            targets = [preferred, *[tile for tile in targets if tile != preferred]]
+
+        for target in targets:
+            move_dir = self._next_nav_move(
+                ct,
+                nav=self._diag_align_nav,
+                nav_target_attr="_diag_align_nav_target",
+                target=target,
+            )
+            if move_dir is None:
+                continue
+            self._nav_dbg(
+                ct,
+                (
+                    "Diagonal ore-align bugnav move "
+                    f"dir={move_dir.name} toward=({target[0]},{target[1]}) "
+                    f"ore=({ore_pos.x},{ore_pos.y})"
+                ),
+            )
+            self._road_then_move(ct, move_dir)
+            return True
+
+        self._blacklist_current_ore(
+            ct,
+            reason=(
+                "diagonal ore alignment found open ore-adjacent tiles but no bugnav "
+                "step toward any target"
+            ),
+        )
+        return True
+
+    def _open_cardinal_ore_tiles_in_vision(
+        self, ct: Controller, ore_pos: Position
+    ) -> set[tuple[int, int]]:
+        open_tiles: set[tuple[int, int]] = set()
+        for move_dir in _CARDINAL_DIRECTIONS:
+            cand = ore_pos.add(move_dir)
+            if self._is_open_stand_tile_in_vision(ct, cand):
+                open_tiles.add((cand.x, cand.y))
+        return open_tiles
+
+    @staticmethod
+    def _is_open_stand_tile_in_vision(ct: Controller, pos: Position) -> bool:
+        if not ct.is_in_vision(pos):
+            return False
+        try:
+            if ct.get_tile_env(pos) == Environment.WALL:
+                return False
+            building_id = ct.get_tile_building_id(pos)
+            if building_id is not None:
+                b_type = ct.get_entity_type(building_id)
+                own_core = b_type == EntityType.CORE and ct.get_team(building_id) == ct.get_team()
+                if not own_core and b_type not in _PASSABLE_BUILDINGS:
+                    return False
+            builder_id = ct.get_tile_builder_bot_id(pos)
+            if builder_id is not None:
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _clear_diagonal_alignment_state(self) -> None:
+        self._diag_align_nav = TangentNav()
+        self._diag_align_nav_target = None
+        self._diag_align_ore_target = None
+
+    def _cleanup_ore_blacklist(self, ct: Controller) -> None:
+        curr_round = ct.get_current_round()
+        prev_size = len(self._ore_blacklist)
+        self._ore_blacklist = {
+            ore: expiry for ore, expiry in self._ore_blacklist.items() if expiry > curr_round
+        }
+        if prev_size != len(self._ore_blacklist):
+            self._nav_dbg(
+                ct,
+                (
+                    f"Ore blacklist cleanup {prev_size}->{len(self._ore_blacklist)} "
+                    f"at round={curr_round}"
+                ),
+            )
+
+    def _is_ore_blacklisted(self, ct: Controller, ore: tuple[int, int]) -> bool:
+        expiry = self._ore_blacklist.get(ore)
+        return expiry is not None and expiry > ct.get_current_round()
+
+    def _blacklist_current_ore(self, ct: Controller, reason: str) -> None:
+        if self.ore_target is None:
+            return
+        expiry = ct.get_current_round() + _ORE_TARGET_BLACKLIST_ROUNDS
+        self._ore_blacklist[self.ore_target] = expiry
+        self._nav_dbg(
+            ct,
+            (
+                f"Blacklisting ore {self.ore_target} until round={expiry}. "
+                f"reason={reason}"
+            ),
+        )
+        self._clear_ore_target()
+
     def _clear_ore_target(self) -> None:
         self.ore_target = None
         self._ore_nav_target = None
         self._ore_nav = TangentNav()
+        self._clear_diagonal_alignment_state()
 
     def _nav_dbg(self, ct: Controller, msg: str) -> None:
         if not self._nav_dbg_enabled(ct):
