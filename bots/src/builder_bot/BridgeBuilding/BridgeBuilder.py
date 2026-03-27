@@ -8,7 +8,7 @@ from ..Movement.TangentBug import TangentBug
 
 ORE_ENVS = (Environment.ORE_TITANIUM,)
 ACTION_RADIUS_SQ = 2
-BRIDGE_BUILDER_DEBUG_PRINTS = True
+BRIDGE_BUILDER_DEBUG_PRINTS = False
 CARDINAL_DIRECTIONS = (
     Direction.NORTH,
     Direction.EAST,
@@ -421,6 +421,9 @@ class BridgeBuilder:
         start_pos = ct.get_position()
         self._log(ct, f"bridge-cycle start from ({start_pos.x},{start_pos.y})")
 
+        if self._try_attack_underfoot_enemy_road(ct, start_pos):
+            return True
+
         target_pos = self._select_bridge_target_toward_core(
             ct=ct,
             start_pos=start_pos,
@@ -588,6 +591,31 @@ class BridgeBuilder:
 
         self._log(ct, "no valid bridge target candidate after tile-state filtering")
         return None
+
+    def _try_attack_underfoot_enemy_road(self, ct: Controller, my_pos: Position) -> bool:
+        building_id = ct.get_tile_building_id(my_pos)
+        if building_id is None:
+            return False
+
+        b_type = ct.get_entity_type(building_id)
+        if b_type != EntityType.ROAD:
+            return False
+
+        if ct.get_team(building_id) == ct.get_team():
+            return False
+
+        if ct.can_fire(my_pos):
+            ct.fire(my_pos)
+            self._log(
+                ct,
+                f"on enemy road and fired underfoot at ({my_pos.x},{my_pos.y})",
+            )
+        else:
+            self._log(
+                ct,
+                f"on enemy road but cannot fire underfoot this turn at ({my_pos.x},{my_pos.y})",
+            )
+        return True
 
     def _is_valid_bridge_target_tile(self, ct: Controller, pos: Position) -> bool:
         # Preserve terminal behavior: when target lands on core tile we end bridge cycle.

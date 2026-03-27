@@ -13,11 +13,12 @@ from cambc import Controller, EntityType
 
 from core.main import Core
 from builder_bot.main import BuilderBot
+from sentinel.main import Sentinel
 
 
 class Player:
     def __init__(self):
-        self.active: Core | BuilderBot | None = None
+        self.active: Core | BuilderBot | Sentinel | None = None
 
     def run(self, ct: Controller) -> None:
         etype = ct.get_entity_type()
@@ -30,4 +31,8 @@ class Player:
         elif etype == EntityType.BUILDER_BOT:
             if self.active is None:
                 self.active = BuilderBot()
+            self.active.run(ct)
+        elif etype == EntityType.SENTINEL:
+            if self.active is None:
+                self.active = Sentinel()
             self.active.run(ct)

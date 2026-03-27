@@ -58,14 +58,14 @@ class SymmetryAnalyzer:
             self.possible.discard(101)
             if self.debug_prints:
                 print(
-                    f"[Bot {self.my_core}] Init: ruled out REF_X — 3x3 core overlaps vertical axis band",
+                    f"[Bot {self.my_core}] Init: ruled out REF_X - 3x3 core overlaps vertical axis band",
                     file=sys.stderr,
                 )
         if abs(core_y - cy) <= 1.0 and 102 in self.possible:
             self.possible.discard(102)
             if self.debug_prints:
                 print(
-                    f"[Bot {self.my_core}] Init: ruled out REF_Y — 3x3 core overlaps horizontal axis band",
+                    f"[Bot {self.my_core}] Init: ruled out REF_Y - 3x3 core overlaps horizontal axis band",
                     file=sys.stderr,
                 )
 
@@ -137,8 +137,8 @@ class SymmetryAnalyzer:
                         if self.debug_prints:
                             print(
                                 f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] "
-                                f"Ruled out {self.sym_names[sym]} — tile {pos} ({val.value}) "
-                                f"≠ mirror {m_pos} ({self.map_history[m_pos].value})",
+                                f"Ruled out {self.sym_names[sym]} - tile {pos} ({val.value}) "
+                                f"!= mirror {m_pos} ({self.map_history[m_pos].value})",
                                 file=sys.stderr,
                             )
                         break
@@ -164,7 +164,7 @@ class SymmetryAnalyzer:
 
         # PLACEMENT CONDITION:
         # 1. We must know something (mask > 0)
-        # 2. This turn produced genuinely new information — either:
+        # 2. This turn produced genuinely new information - either:
         #    a) A nearby friendly marker taught us something we didn't know yet, OR
         #    b) A tile mismatch invalidated a symmetry candidate this turn
         # 3. What we know must NOT already be covered by nearby markers (Echo Suppression)
@@ -200,14 +200,14 @@ class SymmetryAnalyzer:
                         reasons = []
                         if invalidated_mismatches:
                             mismatch_strs = [
-                                f"{self.sym_names[sym]}: tile {pos} ≠ mirror {m_pos}"
+                                f"{self.sym_names[sym]}: tile {pos} != mirror {m_pos}"
                                 for sym, (pos, m_pos) in invalidated_mismatches.items()
                             ]
                             reasons.append(f"tile mismatches: {', '.join(mismatch_strs)}")
                         if marker_gave_new_info:
                             marker_elim_names = [self.sym_names[s] for s in (101, 102, 103) if s in newly_eliminated_by_marker]
                             reasons.append(f"read marker: newly eliminated=[{', '.join(marker_elim_names)}]")
-                        reason = " — " + " + ".join(reasons)
+                        reason = " - " + " + ".join(reasons)
                         print(
                             f"TURN {ct.get_current_round()}: [Bot {(cur.x, cur.y)}] "
                             f"Placed marker at ({target_tile.x}, {target_tile.y}) "

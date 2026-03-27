@@ -258,7 +258,12 @@ class TangentBug:
             bid = ct.get_tile_building_id(pos)
             if bid is not None:
                 et = ct.get_entity_type(bid)
-                if et in (EntityType.ROAD, EntityType.CONVEYOR, EntityType.ARMOURED_CONVEYOR):
+                if et in (
+                    EntityType.ROAD,
+                    EntityType.BRIDGE,
+                    EntityType.CONVEYOR,
+                    EntityType.ARMOURED_CONVEYOR,
+                ):
                     ok = True
                 elif et == EntityType.CORE:
                     ok = ct.get_team(bid) == ct.get_team()
