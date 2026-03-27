@@ -1,4 +1,7 @@
-from cambc import Controller, EntityType, Position
+from collections import deque
+from sys import stderr
+
+from cambc import Controller, EntityType
 
 
 class Turret:
@@ -11,14 +14,57 @@ class Turret:
             EntityType.BUILDER_BOT: 60,
             EntityType.ROAD: 50,
         }
+        self.iam : EntityType | None = None
+        self.radar = {}
+        self.enter = {}
 
     def run(self, ct: Controller):
+        if self.iam is None:
+            self.iam = ct.get_entity_type()
+
+        if self.iam == EntityType.LAUNCHER:
+            self.launcher(ct)
+        else:
+            self.turret(ct)
+    
+    def launcher(self,ct:Controller):
+        nearby_entities = ct.get_nearby_entities()
+        all_enemy_builder_bots = list(filter(
+            lambda x: (
+                ct.get_team(x) != ct.get_team()
+                and ct.get_entity_type(x) == EntityType.BUILDER_BOT
+            ),
+            nearby_entities,
+        ))
+
+        my_pos = ct.get_position()
+
+        for bot in all_enemy_builder_bots:       
+            pos = ct.get_position(bot)
+            if bot in self.radar:
+                self.radar[bot].appendleft(pos)
+            else:
+                self.radar[bot] = deque(maxlen=6)
+                self.radar[bot].appendleft(pos)
+                self.enter[bot] = pos
+            
+            trace = self.radar[bot]
+            for i in range(0,len(trace)-1):
+                ct.draw_indicator_line(trace[i],trace[i+1],255,0,0)
+
+            if my_pos.distance_squared(pos) <= 2:
+                ct.launch(pos,self.enter[bot])
+                ct.draw_indicator_dot(trace[0],0,0,255)
+                ct.draw_indicator_dot(self.enter[bot],0,255,0)
+            
+
+    def turret(self,ct:Controller):
         """
         Simple turret behavior:
         1. Scan for nearby enemy entities.
         2. Prioritize targets based on type: Core > Bridge > Conveyor > Builder_bot > Road.
         3. Use distance as a tie-breaker for the same priority.
-        4. Execute action (launch for launchers, fire for others).
+        4. Fire at the highest priority target within range.
         """
         # Early exit if on cooldown
         if ct.get_action_cooldown() > 0:
@@ -26,7 +72,6 @@ class Turret:
 
         my_pos = ct.get_position()
         my_team = ct.get_team()
-        is_launcher = ct.get_entity_type() == EntityType.LAUNCHER
 
         # Find all nearby enemies
         nearby_entities = ct.get_nearby_entities()
@@ -38,11 +83,6 @@ class Turret:
                 continue
 
             etype = ct.get_entity_type(e_id)
-            
-            # Launchers can only target builder bots
-            if is_launcher and etype != EntityType.BUILDER_BOT:
-                continue
-                
             priority = self.priority_map.get(etype, 0)
 
             if priority > 0:
@@ -58,45 +98,8 @@ class Turret:
         # Sort by priority (descending) then distance (ascending)
         possible_targets.sort(key=lambda x: (-x[0], x[1]))
 
-        # Handle the best available target
+        # Fire at the best available target
         for _, _, target_pos in possible_targets:
-            if is_launcher:
-                if self._handle_launch(ct, target_pos):
-                    return
-            else:
-                if self._handle_attack(ct, target_pos):
-                    return
-
-    def _handle_attack(self, ct: Controller, target_pos: Position) -> bool:
-        if ct.can_fire(target_pos):
-            ct.fire(target_pos)
-            return True
-        return False
-
-    def _handle_launch(self, ct: Controller, target_pos: Position) -> bool:
-        """
-        Find a valid destination far away from the turret and launch the bot.
-        """
-        my_pos = ct.get_position()
-        diff_x = target_pos.x - my_pos.x
-        diff_y = target_pos.y - my_pos.y
-        
-        # Normalize and scale to max throw range (distance ~5, dist_sq 25)
-        # We'll try decreasing distances from 5 down to 1
-        for dist in range(5, 0, -1):
-            # Avoid division by zero if diff_x and diff_y are both 0 (shouldn't happen for a target)
-            # Use max(1, ...) to prevent division by zero if diff_x + diff_y is 0
-            divisor = max(1, abs(diff_x) + abs(diff_y))
-            dest_x = target_pos.x + int(diff_x * dist / divisor)
-            dest_y = target_pos.y + int(diff_y * dist / divisor)
-            
-            # Basic map bounds check
-            if not (0 <= dest_x < ct.get_map_width() and 0 <= dest_y < ct.get_map_height()):
-                continue
-                
-            destination = Position(dest_x, dest_y)
-            if ct.can_launch(target_pos, destination):
-                ct.launch(target_pos, destination)
-                return True
-                
-        return False
+            if ct.can_fire(target_pos):
+                ct.fire(target_pos)
+                return
