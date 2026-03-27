@@ -1,3 +1,4 @@
+import random
 import sys
 from typing import Any, Literal
 
@@ -5,6 +6,8 @@ from cambc import Controller, Direction, EntityType, Environment, Position
 
 from ..Movement.TangentNav import TangentNav
 from ..helper import get_cost_affordability
+
+POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 50
 
 ACTION_RADIUS_SQ = 2
 ORE_ENVS = (Environment.ORE_TITANIUM,)
@@ -47,6 +50,7 @@ class BridgeBuilder:
         self._diag_align_nav_target: tuple[int, int] | None = None
         self._diag_align_ore_target: tuple[int, int] | None = None
         self._ore_blacklist: dict[tuple[int, int], int] = {}
+        self._greedy_return_no_join_merge = False
 
     def run(
         self,
@@ -136,6 +140,7 @@ class BridgeBuilder:
 
             build_result = self._build_generator_on_ore(ct, ore_pos)
             if build_result == "built":
+                self._roll_post_harvester_return_mode(ct)
                 self._clear_ore_target()
                 self._start_post_build_alignment(ore_pos)
                 self._return_nav_target = None
@@ -217,17 +222,24 @@ class BridgeBuilder:
                     self._return_nav_target = None
                 return True
 
-        endpoint_result = self._try_build_adjacent_endpoint_conveyor(ct, my_pos)
-        if endpoint_result == "completed_cycle":
+        skip_bridge_placement = False
+        if self._greedy_return_no_join_merge:
             self._nav_dbg(
                 ct,
-                "Adjacent endpoint conveyor placed; finishing return cycle for this ore.",
+                "Greedy return active; skipping adjacent endpoint join shortcut.",
             )
-            self._finish_return_cycle()
-            return True
-        skip_bridge_placement = endpoint_result == "continue_nav"
-        if endpoint_result == "handled":
-            return True
+        else:
+            endpoint_result = self._try_build_adjacent_endpoint_conveyor(ct, my_pos)
+            if endpoint_result == "completed_cycle":
+                self._nav_dbg(
+                    ct,
+                    "Adjacent endpoint conveyor placed; finishing return cycle for this ore.",
+                )
+                self._finish_return_cycle()
+                return True
+            skip_bridge_placement = endpoint_result == "continue_nav"
+            if endpoint_result == "handled":
+                return True
 
         move_target = core_pos
         if not skip_bridge_placement:
@@ -235,6 +247,10 @@ class BridgeBuilder:
                 ct=ct,
                 start_pos=my_pos,
                 core_pos=core_pos,
+                allow_chain_join=not self._greedy_return_no_join_merge,
+                allow_merge_with_existing_return_path=(
+                    not self._greedy_return_no_join_merge
+                ),
             )
             if bridge_target is None:
                 self._nav_dbg(
@@ -269,13 +285,28 @@ class BridgeBuilder:
                     target_is_existing_return_path = self._is_on_friendly_return_path(
                         ct, bridge_target
                     )
+                    if (
+                        self._greedy_return_no_join_merge
+                        and target_is_existing_return_path
+                    ):
+                        self._nav_dbg(
+                            ct,
+                            (
+                                "Greedy return rejected bridge merge target at "
+                                f"({bridge_target.x},{bridge_target.y}); holding."
+                            ),
+                        )
+                        return True
                     self._clear_underfoot_for_bridge(ct, my_pos)
 
                     if ct.can_build_bridge(my_pos, bridge_target):
                         ct.build_bridge(my_pos, bridge_target)
                         if self._is_on_friendly_core(
                             ct, bridge_target
-                        ) or target_is_existing_return_path:
+                        ) or (
+                            target_is_existing_return_path
+                            and not self._greedy_return_no_join_merge
+                        ):
                             self._finish_return_cycle()
                             return True
                         self._post_bridge_target = (bridge_target.x, bridge_target.y)
@@ -295,7 +326,10 @@ class BridgeBuilder:
                             ct.build_bridge(my_pos, bridge_target)
                             if self._is_on_friendly_core(
                                 ct, bridge_target
-                            ) or target_is_existing_return_path:
+                            ) or (
+                                target_is_existing_return_path
+                                and not self._greedy_return_no_join_merge
+                            ):
                                 self._finish_return_cycle()
                                 return True
                             self._post_bridge_target = (bridge_target.x, bridge_target.y)
@@ -697,11 +731,26 @@ class BridgeBuilder:
             return "built"
         return "blocked"
 
+    def _roll_post_harvester_return_mode(self, ct: Controller) -> None:
+        chance_percent = max(0, min(100, POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT))
+        roll = random.randrange(100)
+        self._greedy_return_no_join_merge = roll < chance_percent
+        self._nav_dbg(
+            ct,
+            (
+                "Post-harvester return mode roll "
+                f"chance={chance_percent}% roll={roll} "
+                f"greedy_no_join_merge={self._greedy_return_no_join_merge}"
+            ),
+        )
+
     def _select_bridge_target_toward_core(
         self,
         ct: Controller,
         start_pos: Position,
         core_pos: tuple[int, int],
+        allow_chain_join: bool = True,
+        allow_merge_with_existing_return_path: bool = True,
     ) -> Position | None:
         core = Position(core_pos[0], core_pos[1])
         candidates: list[Position] = []
@@ -719,22 +768,23 @@ class BridgeBuilder:
         if not candidates:
             return None
 
-        join_target = self._select_nearest_visible_friendly_chain_target(
-            ct=ct,
-            start_pos=start_pos,
-            core=core,
-            candidates=candidates,
-        )
-        if join_target is not None:
-            self._nav_dbg(
-                ct,
-                (
-                    "Selected nearby friendly chain join target "
-                    f"({join_target.x},{join_target.y}) from start "
-                    f"({start_pos.x},{start_pos.y})"
-                ),
+        if allow_chain_join:
+            join_target = self._select_nearest_visible_friendly_chain_target(
+                ct=ct,
+                start_pos=start_pos,
+                core=core,
+                candidates=candidates,
             )
-            return join_target
+            if join_target is not None:
+                self._nav_dbg(
+                    ct,
+                    (
+                        "Selected nearby friendly chain join target "
+                        f"({join_target.x},{join_target.y}) from start "
+                        f"({start_pos.x},{start_pos.y})"
+                    ),
+                )
+                return join_target
 
         candidates.sort(
             key=lambda p: (
@@ -745,7 +795,13 @@ class BridgeBuilder:
             )
         )
         for cand in candidates:
-            if self._is_valid_bridge_target_tile(ct, cand):
+            if self._is_valid_bridge_target_tile(
+                ct,
+                cand,
+                allow_merge_with_existing_return_path=(
+                    allow_merge_with_existing_return_path
+                ),
+            ):
                 return cand
         return None
 
@@ -802,11 +858,21 @@ class BridgeBuilder:
             chain_candidates.sort(key=lambda c: (c[1], c[0], c[2], c[3]))
             return chain_candidates[0][4]
 
-    def _is_valid_bridge_target_tile(self, ct: Controller, pos: Position) -> bool:
+    def _is_valid_bridge_target_tile(
+        self,
+        ct: Controller,
+        pos: Position,
+        allow_merge_with_existing_return_path: bool = True,
+    ) -> bool:
         if self._is_diagonal_adjacent_to_extractor(ct, pos):
             return False
         if self._is_on_friendly_core(ct, pos):
             return True
+        if (
+            not allow_merge_with_existing_return_path
+            and self._is_on_friendly_return_path(ct, pos)
+        ):
+            return False
         building_id = ct.get_tile_building_id(pos)
         if building_id is not None:
             return ct.get_entity_type(building_id) in _PASSABLE_BUILDINGS
@@ -854,6 +920,7 @@ class BridgeBuilder:
         self._post_bridge_target = None
         self._return_nav_target = None
         self._return_nav = TangentNav()
+        self._greedy_return_no_join_merge = False
 
     @staticmethod
     def _is_on_friendly_return_path(ct: Controller, pos: Position) -> bool:
