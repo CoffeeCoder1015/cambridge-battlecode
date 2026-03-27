@@ -31,8 +31,8 @@ class BridgeBuilder:
     # Feature flag: when enabled, only the target unit id emits logs.
     _NAV_DEBUG_ONLY_TARGET_ID = True
     _NAV_DEBUG_TARGET_UNIT_ID = 3
-    _NAV_DEBUG_START_ROUND = 800
-    _NAV_DEBUG_END_ROUND = 850
+    _NAV_DEBUG_START_ROUND = 600
+    _NAV_DEBUG_END_ROUND = 700
 
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
@@ -125,9 +125,6 @@ class BridgeBuilder:
             self._clear_diagonal_alignment_state()
 
         if self._in_action_radius(my_pos, ore_pos):
-            if self._handle_enemy_road_on_ore(ct, ore_pos):
-                return True
-
             # Avoid diagonal extractor placement attempts; bridge/conveyor follow-up
             # requires clean NEWS adjacency around the extractor tile.
             if not self._is_adjacent_cardinal(my_pos, ore_pos):
@@ -246,9 +243,6 @@ class BridgeBuilder:
                 if not affordable_bridge:
                     # Hold position and save for bridge to maintain chain behavior.
                     self._nav_dbg(ct, "Bridge not affordable; holding instead of moving.")
-                    return True
-
-                if self._try_attack_underfoot_enemy_road(ct, my_pos):
                     return True
 
                 target_is_existing_return_path = self._is_on_friendly_return_path(
@@ -618,147 +612,6 @@ class BridgeBuilder:
         if b_type == EntityType.ROAD:
             return None
         return b_type
-
-    @staticmethod
-    def _ore_has_enemy_road(ct: Controller, ore_pos: Position) -> bool:
-        if not ct.is_in_vision(ore_pos):
-            return False
-        try:
-            building_id = ct.get_tile_building_id(ore_pos)
-        except Exception:
-            return False
-        if building_id is None:
-            return False
-        if ct.get_entity_type(building_id) != EntityType.ROAD:
-            return False
-        return ct.get_team(building_id) != ct.get_team()
-
-    def _try_attack_underfoot_enemy_road(self, ct: Controller, my_pos: Position) -> bool:
-        building_id = ct.get_tile_building_id(my_pos)
-        if building_id is None:
-            return False
-
-        if ct.get_entity_type(building_id) != EntityType.ROAD:
-            return False
-        if ct.get_team(building_id) == ct.get_team():
-            return False
-
-        can_attack = getattr(ct, "can_attack", None)
-        attack = getattr(ct, "attack", None)
-        if callable(can_attack) and callable(attack) and can_attack(my_pos):
-            attack(my_pos)
-            self._nav_dbg(
-                ct,
-                (
-                    "On enemy road and attacked underfoot before bridge build "
-                    f"at ({my_pos.x},{my_pos.y}) via attack()."
-                ),
-            )
-            return True
-
-        can_fire = getattr(ct, "can_fire", None)
-        fire = getattr(ct, "fire", None)
-        if callable(can_fire) and callable(fire) and can_fire(my_pos):
-            fire(my_pos)
-            self._nav_dbg(
-                ct,
-                (
-                    "On enemy road and attacked underfoot before bridge build "
-                    f"at ({my_pos.x},{my_pos.y}) via fire()."
-                ),
-            )
-            return True
-
-        self._nav_dbg(
-            ct,
-            (
-                "On enemy road underfoot but cannot attack yet before bridge build "
-                f"at ({my_pos.x},{my_pos.y})."
-            ),
-        )
-        return True
-
-    def _handle_enemy_road_on_ore(self, ct: Controller, ore_pos: Position) -> bool:
-        """
-        If ore is blocked by an enemy road:
-        1) step onto ore,
-        2) attack road while standing on ore,
-        3) let normal cardinal-align/build flow continue next.
-        """
-        if not self._ore_has_enemy_road(ct, ore_pos):
-            return False
-
-        my_pos = ct.get_position()
-        if my_pos != ore_pos:
-            if ct.get_move_cooldown() != 0:
-                self._nav_dbg(
-                    ct,
-                    (
-                        "Enemy road on ore; waiting to step onto ore "
-                        f"move_cd={ct.get_move_cooldown()}"
-                    ),
-                )
-                return True
-
-            move_dir = my_pos.direction_to(ore_pos)
-            if move_dir != Direction.CENTRE and ct.can_move(move_dir):
-                ct.move(move_dir)
-                self._nav_dbg(
-                    ct,
-                    (
-                        f"Enemy road on ore; stepped onto ore via {move_dir.name} "
-                        f"ore=({ore_pos.x},{ore_pos.y})"
-                    ),
-                )
-                return True
-
-            self._nav_dbg(
-                ct,
-                (
-                    "Enemy road on ore; cannot step onto ore this turn "
-                    f"from=({my_pos.x},{my_pos.y}) ore=({ore_pos.x},{ore_pos.y})"
-                ),
-            )
-            return True
-
-        if ct.get_action_cooldown() != 0:
-            self._nav_dbg(
-                ct,
-                (
-                    "Standing on enemy road ore; waiting to attack "
-                    f"action_cd={ct.get_action_cooldown()}"
-                ),
-            )
-            return True
-
-        can_attack = getattr(ct, "can_attack", None)
-        attack = getattr(ct, "attack", None)
-        if callable(can_attack) and callable(attack) and can_attack(ore_pos):
-            attack(ore_pos)
-            self._nav_dbg(
-                ct,
-                f"Attacked enemy road on ore=({ore_pos.x},{ore_pos.y}) via attack().",
-            )
-            return True
-
-        can_fire = getattr(ct, "can_fire", None)
-        fire = getattr(ct, "fire", None)
-        if callable(can_fire) and callable(fire) and can_fire(ore_pos):
-            fire(ore_pos)
-            self._nav_dbg(
-                ct,
-                f"Attacked enemy road on ore=({ore_pos.x},{ore_pos.y}) via fire().",
-            )
-            return True
-
-        self._nav_dbg(
-            ct,
-            (
-                "Standing on enemy road ore but cannot attack this turn "
-                f"ore=({ore_pos.x},{ore_pos.y})"
-            ),
-        )
-        return True
 
     @staticmethod
     def _in_action_radius(my_pos: Position, target: Position) -> bool:
