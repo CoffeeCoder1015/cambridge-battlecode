@@ -209,7 +209,10 @@ class Hound:
             # === STEP 2: Validate existing target ===
             if self.offensive_target_pos is not None:
                 t_pos = Position(*self.offensive_target_pos)
-                if ct.is_position_visible(t_pos):
+                if (
+                    t_pos.distance_squared(ct.get_position())
+                    <= ct.get_vision_radius_sq()
+                ):
                     existing_id = ct.get_tile_building_id(t_pos)
                     if (
                         existing_id is not None
