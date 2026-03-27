@@ -4,6 +4,7 @@ Adapted from srcv2 TangentNav with API compatibility for src-q.
 """
 
 from collections import deque
+import random
 
 from cambc import Controller, Direction, Environment, EntityType, Position
 
@@ -101,6 +102,7 @@ class TangentBug:
         self._trail_repulse: dict[tuple[int, int], int] = {}
         self._loop_repulse: dict[tuple[int, int], int] = {}
         self._pcache: dict[tuple[int, int], int] = {}
+        self._bounce_dir: Direction | None = None
 
     def attach_terrain_memory(
         self, map_history: dict[tuple[int, int], Environment] | None
@@ -142,6 +144,23 @@ class TangentBug:
 
         target_pos = Position(tx, ty)
 
+        if self._bounce_dir is not None:
+            blocked = self._bounce_dir
+            if self._tile_state(ct, cur.add(blocked)) == 0:
+                self._bounce_dir = None
+            else:
+                opposite = blocked.opposite()
+                valid_dirs = [
+                    d
+                    for d in _ALL_DIRS
+                    if d != blocked
+                    and d != opposite
+                    and self._tile_state(ct, cur.add(d)) == 0
+                ]
+                if valid_dirs:
+                    return random.choice(valid_dirs)
+                self._bounce_dir = None
+
         if self._mode == "direct":
             return self._direct_step(ct, cur, target_pos)
         return self._boundary_step(ct, cur, target_pos)
@@ -157,6 +176,7 @@ class TangentBug:
         self._boundary_seen.clear()
         self._last_boundary_pos = None
         self._recent.clear()
+        self._bounce_dir = None
         if clear_run_memory:
             self._visit_counts.clear()
             self._trail_repulse.clear()
@@ -234,7 +254,18 @@ class TangentBug:
 
         ideal_state = self._tile_state(ct, cur.add(best_dir))
         if ideal_state == 1:
-            return None
+            blocked = best_dir
+            opposite = blocked.opposite()
+            valid_dirs = [
+                d
+                for d in _ALL_DIRS
+                if d != blocked
+                and d != opposite
+                and self._tile_state(ct, cur.add(d)) == 0
+            ]
+            if valid_dirs:
+                self._bounce_dir = blocked
+                return random.choice(valid_dirs)
 
         self._enter_boundary(ct, cur, target, best_dir)
         return self._boundary_step(ct, cur, target)

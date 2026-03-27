@@ -209,13 +209,16 @@ class Hound:
             # === STEP 2: Validate existing target ===
             if self.offensive_target_pos is not None:
                 t_pos = Position(*self.offensive_target_pos)
-                existing_id = ct.get_tile_building_id(t_pos)
-                if (
-                    existing_id is not None
-                    and ct.get_entity_type(existing_id) == EntityType.SENTINEL
-                ):
-                    if ct.get_team(existing_id) == ct.get_team():
-                        self.offensive_target_pos = None
+                if ct.is_position_visible(t_pos):
+                    existing_id = ct.get_tile_building_id(t_pos)
+                    if (
+                        existing_id is not None
+                        and ct.get_entity_type(existing_id) == EntityType.SENTINEL
+                    ):
+                        if ct.get_team(existing_id) == ct.get_team():
+                            self.offensive_target_pos = None
+                else:
+                    self.offensive_target_pos = None
 
             # === STEP 3: Target Acquisition (only if no target) ===
             if self.offensive_target_pos is None:
@@ -265,13 +268,14 @@ class Hound:
             # === STEP 4: Decoupled Execution ===
             if self.offensive_target_pos is not None:
                 t_pos = Position(*self.offensive_target_pos)
-                existing_id = ct.get_tile_building_id(t_pos)
+                dist_sq = t_pos.distance_squared(ct.get_position())
 
-                if (
-                    t_pos.distance_squared(ct.get_position())
-                    <= ct.get_vision_radius_sq()
-                    and existing_id is not None
-                ):
+                if dist_sq <= ct.get_vision_radius_sq():
+                    existing_id = ct.get_tile_building_id(t_pos)
+                else:
+                    existing_id = None
+
+                if dist_sq <= ct.get_vision_radius_sq() and existing_id is not None:
                     e_type = ct.get_entity_type(existing_id)
                     if e_type in (EntityType.CONVEYOR, EntityType.BRIDGE):
                         feeds, no_go_key = self._pipeline_feeds_ally_sentinel(
@@ -315,7 +319,10 @@ class Hound:
         potential_targets = []
         for b_type, b_dist, b_id in nearby_buildings:
             b_target_pos = ct.get_position(b_id)
-            if ct.get_team(b_id) != ct.get_team() and (b_target_pos.x,b_target_pos.y) not in self.offensive_no_go:
+            if (
+                ct.get_team(b_id) != ct.get_team()
+                and (b_target_pos.x, b_target_pos.y) not in self.offensive_no_go
+            ):
                 priority = self.PRIORITY_MAP.get(b_type, 10)
                 potential_targets.append((priority, -b_dist, b_id))
 
