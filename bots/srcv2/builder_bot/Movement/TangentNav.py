@@ -57,6 +57,7 @@ _PROBE_DIRS: dict[tuple[Direction, bool], tuple[Direction, ...]] = _build_probe_
 class TangentNav:
     _RECENT_WINDOW = 8
     _MAX_BOUNDARY_STEPS = 300
+    _DEBUG = False
     _DEBUG_MAX_ROUND = 300
     _NEAR_TRAIL_REPULSE_COST = 70
     _DOUBLE_STEP_REPULSE_COST = 20_000
@@ -98,6 +99,33 @@ class TangentNav:
         self.target = (tx, ty)
         self._start = (cur_x, cur_y)
         self._reset(clear_run_memory=True)
+
+    def run_turn(self, ct: Controller) -> None:
+        cur = ct.get_position()
+        target = (ct.get_map_width() // 2, ct.get_map_height() // 2)
+        if self.target != target:
+            self.set_target(target[0], target[1], cur.x, cur.y)
+            self._dbg(ct, f"New target -> {target}")
+
+        move_dir = self.next_move(ct)
+        if move_dir is None:
+            self._dbg(ct, "No move selected.")
+            return
+
+        move_pos = cur.add(move_dir)
+        self._dbg(ct, f"Move {move_dir.name} -> ({move_pos.x},{move_pos.y})")
+
+        if ct.get_action_cooldown() == 0 and ct.can_build_road(move_pos):
+            ct.build_road(move_pos)
+
+        if ct.get_move_cooldown() == 0 and ct.can_move(move_dir):
+            ct.move(move_dir)
+        else:
+            self._dbg(
+                ct,
+                f"Blocked (move_cd={ct.get_move_cooldown()}, "
+                f"can_move={ct.can_move(move_dir)})",
+            )
 
     def next_move(self, ct: Controller) -> Direction | None:
         if self.target is None:
@@ -368,6 +396,6 @@ class TangentNav:
         return 0
 
     def _dbg(self, ct: Controller, msg: str) -> None:
-        if ct.get_current_round() < self._DEBUG_MAX_ROUND:
+        if self._DEBUG and ct.get_current_round() < self._DEBUG_MAX_ROUND:
             pos = ct.get_position()
             print(f"[R{ct.get_current_round()}][TN][{pos.x},{pos.y}] {msg}", file=sys.stderr)
