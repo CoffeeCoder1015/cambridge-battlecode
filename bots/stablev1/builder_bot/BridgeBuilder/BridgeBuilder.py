@@ -13,12 +13,6 @@ _PASSABLE_BUILDINGS = (
     EntityType.CONVEYOR,
     EntityType.ARMOURED_CONVEYOR,
 )
-_CARDINAL_DIRECTIONS = (
-    Direction.NORTH,
-    Direction.EAST,
-    Direction.SOUTH,
-    Direction.WEST,
-)
 
 Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
@@ -27,7 +21,6 @@ class BridgeBuilder:
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
         self.agent_phase: Phase = "SEEK_ORE"
-        self._post_build_align_ore_target: tuple[int, int] | None = None
         self._ore_nav = TangentNav()
         self._ore_nav_target: tuple[int, int] | None = None
         self._return_nav = TangentNav()
@@ -47,9 +40,6 @@ class BridgeBuilder:
 
         if self.agent_phase == "RETURN_CORE":
             return self._run_return_core(ct, core_pos)
-
-        if self._post_build_align_ore_target is not None:
-            return self._run_post_build_cardinal_alignment(ct)
 
         my_pos = ct.get_position()
         visible_ores = self._visible_ores_from_scan(ct, symmetry_analyzer)
@@ -74,7 +64,7 @@ class BridgeBuilder:
             build_result = self._build_generator_on_ore(ct, ore_pos)
             if build_result == "built":
                 self._clear_ore_target()
-                self._start_post_build_alignment(ore_pos)
+                self.agent_phase = "RETURN_CORE"
                 self._return_nav_target = None
                 self._post_bridge_target = None
                 return True
@@ -276,8 +266,6 @@ class BridgeBuilder:
         ct: Controller,
         ore_pos: Position,
     ) -> Literal["built", "waiting_money", "blocked", "cooldown"]:
-        self._clear_ore_build_obstructions(ct, ore_pos)
-
         if self._ore_has_completed_extractor(ct, ore_pos):
             return "blocked"
         if self._ore_blocking_structure_type(ct, ore_pos) is not None:
@@ -336,8 +324,6 @@ class BridgeBuilder:
         return None
 
     def _is_valid_bridge_target_tile(self, ct: Controller, pos: Position) -> bool:
-        if self._is_diagonal_adjacent_to_extractor(ct, pos):
-            return False
         if self._is_on_friendly_core(ct, pos):
             return True
         building_id = ct.get_tile_building_id(pos)
@@ -349,25 +335,6 @@ class BridgeBuilder:
             return ct.get_tile_env(pos) == Environment.EMPTY
         except Exception:
             return False
-
-    @staticmethod
-    def _is_diagonal_adjacent_to_extractor(ct: Controller, pos: Position) -> bool:
-        generator_type = getattr(EntityType, "GENERATOR", None)
-        extractor_types = {EntityType.HARVESTER}
-        if generator_type is not None:
-            extractor_types.add(generator_type)
-
-        diagonals = ((1, 1), (1, -1), (-1, 1), (-1, -1))
-        for dx, dy in diagonals:
-            check = Position(pos.x + dx, pos.y + dy)
-            if not ct.is_in_vision(check):
-                continue
-            building_id = ct.get_tile_building_id(check)
-            if building_id is None:
-                continue
-            if ct.get_entity_type(building_id) in extractor_types:
-                return True
-        return False
 
     @staticmethod
     def _has_marker_at(ct: Controller, pos: Position) -> bool:
@@ -494,97 +461,6 @@ class BridgeBuilder:
             return True
 
         return False
-
-    @staticmethod
-    def _clear_ore_build_obstructions(ct: Controller, ore_pos: Position) -> bool:
-        acted = False
-
-        building_id = ct.get_tile_building_id(ore_pos)
-        if building_id is not None:
-            b_type = ct.get_entity_type(building_id)
-            b_team = ct.get_team(building_id)
-            if (
-                b_team == ct.get_team()
-                and b_type == EntityType.ROAD
-                and ct.can_destroy(ore_pos)
-            ):
-                ct.destroy(ore_pos)
-                acted = True
-
-        if BridgeBuilder._has_friendly_marker_at(ct, ore_pos) and ct.can_destroy(ore_pos):
-            ct.destroy(ore_pos)
-            acted = True
-
-        return acted
-
-    @staticmethod
-    def _has_friendly_marker_at(ct: Controller, pos: Position) -> bool:
-        for entity_id in ct.get_nearby_entities():
-            if ct.get_entity_type(entity_id) != EntityType.MARKER:
-                continue
-            if ct.get_team(entity_id) != ct.get_team():
-                continue
-            if ct.get_position(entity_id) == pos:
-                return True
-        return False
-
-    def _start_post_build_alignment(self, ore_pos: Position) -> None:
-        self._post_build_align_ore_target = (ore_pos.x, ore_pos.y)
-
-    def _run_post_build_cardinal_alignment(self, ct: Controller) -> bool:
-        if self._post_build_align_ore_target is None:
-            return True
-
-        ox, oy = self._post_build_align_ore_target
-        ore_pos = Position(ox, oy)
-        my_pos = ct.get_position()
-        if self._is_adjacent_cardinal(my_pos, ore_pos):
-            self._post_build_align_ore_target = None
-            self.agent_phase = "RETURN_CORE"
-            return True
-
-        moved = self._move_to_cardinal_adjacent_tile(ct, ore_pos)
-        if moved:
-            new_pos = ct.get_position()
-            if self._is_adjacent_cardinal(new_pos, ore_pos):
-                self._post_build_align_ore_target = None
-                self.agent_phase = "RETURN_CORE"
-            return True
-
-        # Hold if no legal cardinal-adjacent move is currently possible.
-        return True
-
-    def _move_to_cardinal_adjacent_tile(self, ct: Controller, ore_pos: Position) -> bool:
-        my_pos = ct.get_position()
-        for move_dir in _CARDINAL_DIRECTIONS:
-            nxt = my_pos.add(move_dir)
-            if not self._is_adjacent_cardinal(nxt, ore_pos):
-                continue
-
-            try:
-                if ct.get_tile_env(nxt) == Environment.WALL:
-                    continue
-                b_id = ct.get_tile_building_id(nxt)
-                if b_id is not None:
-                    b_type = ct.get_entity_type(b_id)
-                    if b_type not in (
-                        EntityType.ROAD,
-                        EntityType.CORE,
-                        EntityType.CONVEYOR,
-                        EntityType.ARMOURED_CONVEYOR,
-                    ):
-                        continue
-            except Exception:
-                continue
-
-            if self._road_then_move(ct, move_dir):
-                return True
-
-        return False
-
-    @staticmethod
-    def _is_adjacent_cardinal(a: Position, b: Position) -> bool:
-        return abs(a.x - b.x) + abs(a.y - b.y) == 1
 
     def _clear_ore_target(self) -> None:
         self.ore_target = None
