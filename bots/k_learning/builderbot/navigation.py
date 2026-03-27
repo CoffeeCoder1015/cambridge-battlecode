@@ -192,12 +192,20 @@ class Navigation:
 
         if not self.pq:
             self.pq = self.get_neighbors()
+            
         
         top = self.pq[0][1]
-        if top == self.current_pos:
+        if top == self.current_pos or top == ct.get_position():
             self.pq.pop(0)
             self.pq.extend(self.get_neighbors())
+            # Update distances
+            new_pq = []
+            for i in range(len(self.pq)):
+                _,pos = self.pq[i]
+                new_val = self.current_pos.distance_squared(Position(*pos))
+                heapq.heappush(new_pq,(new_val,pos))
+            self.pq = new_pq
+        elif self.sym.map_lut[self._get_idx(*top)] == LUT.WALL:
+            self.pq.pop(0)
         else:
             self.move(ct,Position(*top))
-
-        
