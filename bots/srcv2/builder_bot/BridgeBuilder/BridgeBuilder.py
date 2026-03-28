@@ -7,7 +7,7 @@ from cambc import Controller, Direction, EntityType, Environment, Position
 from ..Movement.TangentNav import TangentNav
 from ..helper import get_cost_affordability
 
-POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 50
+POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 0
 
 ACTION_RADIUS_SQ = 2
 ORE_ENVS = (Environment.ORE_TITANIUM,)
@@ -22,6 +22,16 @@ _CARDINAL_DIRECTIONS = (
     Direction.EAST,
     Direction.SOUTH,
     Direction.WEST,
+)
+_ADJACENT_DELTAS = (
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
+    (-1, -1),
+    (-1, 1),
+    (1, -1),
+    (1, 1),
 )
 _ORE_TARGET_BLACKLIST_ROUNDS = 80
 
@@ -51,6 +61,7 @@ class BridgeBuilder:
         self._diag_align_ore_target: tuple[int, int] | None = None
         self._ore_blacklist: dict[tuple[int, int], int] = {}
         self._greedy_return_no_join_merge = False
+        self._launcher_pending_anchor: tuple[int, int] | None = None
 
     def run(
         self,
@@ -76,6 +87,8 @@ class BridgeBuilder:
             self._return_nav.attach_terrain_memory(map_history)
             self._diag_align_nav.attach_terrain_memory(map_history)
         self._cleanup_ore_blacklist(ct)
+        if self._handle_pending_launcher_after_bridge(ct):
+            return True
 
         if self.agent_phase == "RETURN_CORE":
             return self._run_return_core(ct, core_pos)
@@ -301,6 +314,7 @@ class BridgeBuilder:
 
                     if ct.can_build_bridge(my_pos, bridge_target):
                         ct.build_bridge(my_pos, bridge_target)
+                        self._launcher_pending_anchor = (my_pos.x, my_pos.y)
                         if self._is_on_friendly_core(
                             ct, bridge_target
                         ) or (
@@ -324,6 +338,7 @@ class BridgeBuilder:
                             my_pos, bridge_target
                         ):
                             ct.build_bridge(my_pos, bridge_target)
+                            self._launcher_pending_anchor = (my_pos.x, my_pos.y)
                             if self._is_on_friendly_core(
                                 ct, bridge_target
                             ) or (
@@ -1487,6 +1502,130 @@ class BridgeBuilder:
         self._ore_nav_target = None
         self._ore_nav = TangentNav()
         self._clear_diagonal_alignment_state()
+
+    def _handle_pending_launcher_after_bridge(self, ct: Controller) -> bool:
+        if self._launcher_pending_anchor is None:
+            return False
+
+        anchor = Position(
+            self._launcher_pending_anchor[0],
+            self._launcher_pending_anchor[1],
+        )
+        my_pos = ct.get_position()
+        width = ct.get_map_width()
+        height = ct.get_map_height()
+        adjacent: list[Position] = []
+        for dx, dy in _ADJACENT_DELTAS:
+            nx = anchor.x + dx
+            ny = anchor.y + dy
+            if 0 <= nx < width and 0 <= ny < height:
+                adjacent.append(Position(nx, ny))
+
+        if not adjacent:
+            self._launcher_pending_anchor = None
+            return False
+
+        actionable = [
+            pos for pos in adjacent if self._in_action_radius(my_pos, pos)
+        ]
+        if not actionable:
+            self._nav_dbg(
+                ct,
+                (
+                    "Skipping pending defensive launcher: no adjacent anchor tiles "
+                    f"in action range from ({my_pos.x},{my_pos.y}) "
+                    f"for anchor=({anchor.x},{anchor.y})."
+                ),
+            )
+            self._launcher_pending_anchor = None
+            return False
+
+        empty_tiles: list[Position] = []
+        friendly_road_tiles: list[Position] = []
+        enemy_road_tiles: list[Position] = []
+        for pos in actionable:
+            building_id = ct.get_tile_building_id(pos)
+            if building_id is None:
+                empty_tiles.append(pos)
+                continue
+            if ct.get_entity_type(building_id) != EntityType.ROAD:
+                continue
+            if ct.get_team(building_id) == ct.get_team():
+                friendly_road_tiles.append(pos)
+            else:
+                enemy_road_tiles.append(pos)
+
+        # Priority 1: any empty adjacent tile.
+        if empty_tiles:
+            affordable, _, _ = get_cost_affordability(ct, "get_launcher_cost")
+            if not affordable or ct.get_action_cooldown() != 0:
+                return False
+            for pos in empty_tiles:
+                if ct.can_build_launcher(pos):
+                    ct.build_launcher(pos)
+                    self._launcher_pending_anchor = None
+                    self._nav_dbg(
+                        ct,
+                        (
+                            "Built defensive launcher adjacent to bridge anchor "
+                            f"at ({pos.x},{pos.y}) for anchor=({anchor.x},{anchor.y})."
+                        ),
+                    )
+                    return True
+            return False
+
+        # Priority 2: no empty tile, clear friendly road first.
+        if friendly_road_tiles:
+            if ct.get_action_cooldown() != 0:
+                return False
+            for pos in friendly_road_tiles:
+                if ct.can_destroy(pos):
+                    ct.destroy(pos)
+                    self._nav_dbg(
+                        ct,
+                        (
+                            "Destroyed friendly road to free launcher tile "
+                            f"at ({pos.x},{pos.y}) for anchor=({anchor.x},{anchor.y})."
+                        ),
+                    )
+                    return True
+            return False
+
+        # Priority 3: no empty/friendly road, attack enemy road first.
+        if enemy_road_tiles:
+            if ct.get_action_cooldown() != 0:
+                return False
+            for pos in enemy_road_tiles:
+                if self._attack_position(ct, pos):
+                    self._nav_dbg(
+                        ct,
+                        (
+                            "Attacked enemy road to free launcher tile "
+                            f"at ({pos.x},{pos.y}) for anchor=({anchor.x},{anchor.y})."
+                        ),
+                    )
+                    return True
+            return False
+
+        # Priority 4: nothing usable around anchor; skip and continue normal logic.
+        self._launcher_pending_anchor = None
+        return False
+
+    @staticmethod
+    def _attack_position(ct: Controller, target: Position) -> bool:
+        can_attack = getattr(ct, "can_attack", None)
+        attack = getattr(ct, "attack", None)
+        if callable(can_attack) and callable(attack) and can_attack(target):
+            attack(target)
+            return True
+
+        can_fire = getattr(ct, "can_fire", None)
+        fire = getattr(ct, "fire", None)
+        if callable(can_fire) and callable(fire) and can_fire(target):
+            fire(target)
+            return True
+
+        return False
 
     def _nav_dbg(self, ct: Controller, msg: str) -> None:
         if not self._nav_dbg_enabled(ct):
