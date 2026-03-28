@@ -42,12 +42,12 @@ Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
 class BridgeBuilder:
     # Master toggle for high-detail BridgeBuilder navigation logs.
-    _NAV_DEBUG = False
+    _NAV_DEBUG = True
     # Feature flag: when enabled, only the target unit id emits logs.
-    _NAV_DEBUG_ONLY_TARGET_ID = False
+    _NAV_DEBUG_ONLY_TARGET_ID = True
     _NAV_DEBUG_TARGET_UNIT_ID = 3
-    _NAV_DEBUG_START_ROUND = 300
-    _NAV_DEBUG_END_ROUND = 420
+    _NAV_DEBUG_START_ROUND = 200
+    _NAV_DEBUG_END_ROUND = 280
 
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
@@ -131,9 +131,25 @@ class BridgeBuilder:
                         )
                         self._clear_ore_target()
 
+        best_visible_ore = self._select_reachable_ore(ct, my_pos, visible_ores, map_history)
         if self.ore_target is None:
-            self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores, map_history)
+            self.ore_target = best_visible_ore
             self._nav_dbg(ct, f"Selected ore target -> {self.ore_target}")
+        elif best_visible_ore is not None and best_visible_ore != self.ore_target:
+            current_dist_sq = (my_pos.x - self.ore_target[0]) ** 2 + (my_pos.y - self.ore_target[1]) ** 2
+            new_dist_sq = (my_pos.x - best_visible_ore[0]) ** 2 + (my_pos.y - best_visible_ore[1]) ** 2
+            if new_dist_sq < current_dist_sq:
+                old_target = self.ore_target
+                self._clear_ore_target()
+                self.ore_target = best_visible_ore
+                self._nav_dbg(
+                    ct,
+                    (
+                        "Retargeting to closer visible ore "
+                        f"from {old_target} dist_sq={current_dist_sq} "
+                        f"to {self.ore_target} dist_sq={new_dist_sq}"
+                    ),
+                )
 
         if self.ore_target is None:
             self._nav_dbg(ct, "No ore target; falling back to center exploration nav.")
