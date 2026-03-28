@@ -34,6 +34,7 @@ _ADJACENT_DELTAS = (
     (1, 1),
 )
 _ORE_TARGET_BLACKLIST_ROUNDS = 80
+ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE = True
 
 Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
@@ -87,8 +88,11 @@ class BridgeBuilder:
             self._return_nav.attach_terrain_memory(map_history)
             self._diag_align_nav.attach_terrain_memory(map_history)
         self._cleanup_ore_blacklist(ct)
-        if self._handle_pending_launcher_after_bridge(ct):
-            return True
+        if ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE:
+            if self._handle_pending_launcher_after_bridge(ct):
+                return True
+        elif self._launcher_pending_anchor is not None:
+            self._launcher_pending_anchor = None
 
         if self.agent_phase == "RETURN_CORE":
             return self._run_return_core(ct, core_pos)
@@ -314,7 +318,8 @@ class BridgeBuilder:
 
                     if ct.can_build_bridge(my_pos, bridge_target):
                         ct.build_bridge(my_pos, bridge_target)
-                        self._launcher_pending_anchor = (my_pos.x, my_pos.y)
+                        if ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE:
+                            self._launcher_pending_anchor = (my_pos.x, my_pos.y)
                         if self._is_on_friendly_core(
                             ct, bridge_target
                         ) or (
@@ -338,7 +343,8 @@ class BridgeBuilder:
                             my_pos, bridge_target
                         ):
                             ct.build_bridge(my_pos, bridge_target)
-                            self._launcher_pending_anchor = (my_pos.x, my_pos.y)
+                            if ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE:
+                                self._launcher_pending_anchor = (my_pos.x, my_pos.y)
                             if self._is_on_friendly_core(
                                 ct, bridge_target
                             ) or (
@@ -1512,6 +1518,17 @@ class BridgeBuilder:
             self._launcher_pending_anchor[1],
         )
         my_pos = ct.get_position()
+        if self._has_adjacent_friendly_launcher(ct, my_pos):
+            self._nav_dbg(
+                ct,
+                (
+                    "Skipping pending defensive launcher: friendly launcher already "
+                    f"adjacent to bot at ({my_pos.x},{my_pos.y})."
+                ),
+            )
+            self._launcher_pending_anchor = None
+            return False
+
         width = ct.get_map_width()
         height = ct.get_map_height()
         adjacent: list[Position] = []
@@ -1625,6 +1642,25 @@ class BridgeBuilder:
             fire(target)
             return True
 
+        return False
+
+    @staticmethod
+    def _has_adjacent_friendly_launcher(ct: Controller, center: Position) -> bool:
+        width = ct.get_map_width()
+        height = ct.get_map_height()
+        for dx, dy in _ADJACENT_DELTAS:
+            nx = center.x + dx
+            ny = center.y + dy
+            if not (0 <= nx < width and 0 <= ny < height):
+                continue
+            pos = Position(nx, ny)
+            building_id = ct.get_tile_building_id(pos)
+            if building_id is None:
+                continue
+            if ct.get_team(building_id) != ct.get_team():
+                continue
+            if ct.get_entity_type(building_id) == EntityType.LAUNCHER:
+                return True
         return False
 
     def _nav_dbg(self, ct: Controller, msg: str) -> None:
