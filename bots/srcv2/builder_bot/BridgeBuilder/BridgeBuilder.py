@@ -7,7 +7,7 @@ from cambc import Controller, Direction, EntityType, Environment, Position
 from ..Movement.TangentNav import TangentNav
 from ..helper import get_cost_affordability
 
-POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 0
+POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 20
 
 ACTION_RADIUS_SQ = 2
 ORE_ENVS = (Environment.ORE_TITANIUM,)
@@ -42,9 +42,9 @@ Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
 class BridgeBuilder:
     # Master toggle for high-detail BridgeBuilder navigation logs.
-    _NAV_DEBUG = True
+    _NAV_DEBUG = False
     # Feature flag: when enabled, only the target unit id emits logs.
-    _NAV_DEBUG_ONLY_TARGET_ID = True
+    _NAV_DEBUG_ONLY_TARGET_ID = False
     _NAV_DEBUG_TARGET_UNIT_ID = 3
     _NAV_DEBUG_START_ROUND = 200
     _NAV_DEBUG_END_ROUND = 280
