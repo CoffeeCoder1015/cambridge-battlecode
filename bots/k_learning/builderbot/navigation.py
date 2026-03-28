@@ -124,6 +124,12 @@ class Navigation:
         self.current_pos: Position | None = None
         self.sym = None
         self.pq = []
+        self.visited = set()
+        self.hugging_wall = 0
+        self.start_pos = None
+        self.hit_dist = None
+        self.hit_pos = None
+        self.last_dir = None
     
     def _get_idx(self, x: int, y: int) -> int:
         return y * self.w + x
@@ -139,25 +145,17 @@ class Navigation:
         for pos in nearby_tiles:
             idx = self._get_idx(*pos)
             self.map_lut[idx] = 1
+        self.map_lut[self._get_idx(current_pos.x,current_pos.y)] = 2
     
     def get_lut(self,x,y):
         return self.map_lut[self._get_idx(x,y)]
 
     def move(self,ct:Controller,target_pos:Position):
+        self.current_pos = ct.get_position()
         m_dir = self.current_pos.direction_to(target_pos)
-        for _ in range(8):
-            next_pos = self.current_pos.add(m_dir)
-            if ct.can_move(m_dir) and self.get_lut(*next_pos) == 0:
-                ct.move(m_dir)
-                return True
-            elif ct.can_build_road(next_pos):
-                ct.build_road(next_pos)
-                ct.move(m_dir)
-                return True
-            else:
-                m_dir = m_dir.rotate_left()
-        for _ in range(8):
-            next_pos = self.current_pos.add(m_dir)
+        next_pos = self.current_pos.add(m_dir)
+        if self.hugging_wall == 0:
+            self.start_pos = self.current_pos
             if ct.can_move(m_dir):
                 ct.move(m_dir)
                 return True
@@ -165,11 +163,65 @@ class Navigation:
                 ct.build_road(next_pos)
                 ct.move(m_dir)
                 return True
-            else:
-                m_dir = m_dir.rotate_right()
-        return False
 
-    def get_neighbors(self):
+            self.hugging_wall = 1
+            self.hit_dist = self.current_pos.distance_squared(target_pos)
+            self.hit_pos = self.current_pos
+            self.last_dir = m_dir
+
+
+        dx = target_pos.x - self.start_pos.x
+        dy = target_pos.y - self.start_pos.y
+        cx = self.current_pos.x - self.start_pos.x
+        cy = self.current_pos.y - self.start_pos.y
+
+        on_mline = None
+        # Cross product should be ~0 for collinear points
+        cross = dx * cy - dy * cx
+        if abs(cross) > 1:  # tolerance of 1 for grid cells
+            on_mline = False
+
+        # Dot product to check current is between start and target
+        dot = cx * dx + cy * dy
+        len_sq = dx * dx + dy * dy
+        on_mline = 0 <= dot <= len_sq
+
+
+        current_dist = self.current_pos.distance_squared(target_pos)
+        if ( self.current_pos != self.hit_pos and current_dist < self.hit_dist and on_mline):
+            print("EXITING")
+            if ct.can_move(m_dir):
+                ct.move(m_dir)
+                self.hugging_wall = 0
+                return True
+            elif ct.can_build_road(next_pos):
+                ct.build_road(next_pos)
+                ct.move(m_dir)
+                self.hugging_wall = 0
+                return True
+        
+        for _ in range(9):
+            rs = self.last_dir.rotate_right()
+            right_pos =  self.current_pos.add(rs)
+            right_env = ct.get_tile_env(right_pos) 
+            right_build_id = ct.get_tile_building_id(right_pos) 
+            right_build = ct.get_entity_type(right_build_id) if right_build_id else None
+            hugging_enemy_core = right_build==EntityType.CORE and ct.get_team(right_build_id) != ct.get_team()
+            next_pos = self.current_pos.add(self.last_dir)
+            if right_env == Environment.WALL or hugging_enemy_core :
+                if ct.can_move(self.last_dir):
+                    ct.move(self.last_dir)
+                    return True
+                elif ct.can_build_road(next_pos):
+                    ct.build_road(next_pos)
+                    ct.move(self.last_dir)
+                    return True
+            self.last_dir = self.last_dir.rotate_left()
+            
+
+        raise Exception("Failed to move")
+
+    def get_neighbors(self,ct:Controller):
         quads = [
             (self.current_pos.x, self.current_pos.y - 5),
             (self.current_pos.x + 5, self.current_pos.y - 5),
@@ -182,8 +234,9 @@ class Navigation:
         ]
         neighbors = []
         for q in quads:
-            if self.in_bounds(*q) and self.get_lut(*q) == 0:
+            if self.in_bounds(*q) and q not in self.visited:
                 neighbors.append((0,q))
+                self.visited.add(q)
         return neighbors
 
     def explore(self,ct:Controller):
@@ -191,21 +244,26 @@ class Navigation:
             ct.draw_indicator_dot(Position(*p),255,0,0)
 
         if not self.pq:
-            self.pq = self.get_neighbors()
+            self.pq = self.get_neighbors(ct)
             
         
         top = self.pq[0][1]
-        if top == self.current_pos or top == ct.get_position():
+        if (self.current_pos.x,self.current_pos.y) == top:
             self.pq.pop(0)
-            self.pq.extend(self.get_neighbors())
-            # Update distances
-            new_pq = []
-            for i in range(len(self.pq)):
-                _,pos = self.pq[i]
-                new_val = self.current_pos.distance_squared(Position(*pos))
-                heapq.heappush(new_pq,(new_val,pos))
-            self.pq = new_pq
-        elif self.sym.map_lut[self._get_idx(*top)] == LUT.WALL:
-            self.pq.pop(0)
+            self.pq.extend(self.get_neighbors(ct))
         else:
-            self.move(ct,Position(*top))
+            tpos = Position(*top)
+            dist = self.current_pos.distance_squared(tpos)
+            if dist <= ct.get_vision_radius_sq() and ct.get_tile_env(tpos)  == Environment.WALL:
+                self.pq.pop(0)
+        
+        # Update distances
+        new_pq = []
+        for i in range(len(self.pq)):
+            _,pos = self.pq[i]
+            new_val = self.current_pos.distance_squared(Position(*pos)) 
+            heapq.heappush(new_pq,(new_val,pos))
+        self.pq = new_pq
+        final_target = Position(*self.pq[0][1])
+        ct.draw_indicator_line(self.current_pos,final_target,0,255,0)
+        self.move(ct,final_target)
