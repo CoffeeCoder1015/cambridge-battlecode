@@ -7,7 +7,7 @@ from cambc import Controller, Direction, EntityType, Environment, Position
 from ..Movement.TangentNav import TangentNav
 from ..helper import get_cost_affordability
 
-POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 50
+POST_HARVESTER_GREEDY_RETURN_CHANCE_PERCENT = 20
 
 ACTION_RADIUS_SQ = 2
 ORE_ENVS = (Environment.ORE_TITANIUM,)
@@ -23,19 +23,31 @@ _CARDINAL_DIRECTIONS = (
     Direction.SOUTH,
     Direction.WEST,
 )
+_ADJACENT_DELTAS = (
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
+    (-1, -1),
+    (-1, 1),
+    (1, -1),
+    (1, 1),
+)
 _ORE_TARGET_BLACKLIST_ROUNDS = 80
+ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE = True
+ENABLE_BRIDGE_PAD_LAUNCHER_LOGS = False
 
 Phase = Literal["SEEK_ORE", "RETURN_CORE"]
 
 
 class BridgeBuilder:
     # Master toggle for high-detail BridgeBuilder navigation logs.
-    _NAV_DEBUG = True
+    _NAV_DEBUG = False
     # Feature flag: when enabled, only the target unit id emits logs.
-    _NAV_DEBUG_ONLY_TARGET_ID = True
+    _NAV_DEBUG_ONLY_TARGET_ID = False
     _NAV_DEBUG_TARGET_UNIT_ID = 3
-    _NAV_DEBUG_START_ROUND = 300
-    _NAV_DEBUG_END_ROUND = 420
+    _NAV_DEBUG_START_ROUND = 200
+    _NAV_DEBUG_END_ROUND = 280
 
     def __init__(self) -> None:
         self.ore_target: tuple[int, int] | None = None
@@ -51,6 +63,7 @@ class BridgeBuilder:
         self._diag_align_ore_target: tuple[int, int] | None = None
         self._ore_blacklist: dict[tuple[int, int], int] = {}
         self._greedy_return_no_join_merge = False
+        self._launcher_pending_anchor: tuple[int, int] | None = None
 
     def run(
         self,
@@ -76,6 +89,11 @@ class BridgeBuilder:
             self._return_nav.attach_terrain_memory(map_history)
             self._diag_align_nav.attach_terrain_memory(map_history)
         self._cleanup_ore_blacklist(ct)
+        if ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE:
+            if self._handle_pending_launcher_after_bridge(ct):
+                return True
+        elif self._launcher_pending_anchor is not None:
+            self._launcher_pending_anchor = None
 
         if self.agent_phase == "RETURN_CORE":
             return self._run_return_core(ct, core_pos)
@@ -113,9 +131,25 @@ class BridgeBuilder:
                         )
                         self._clear_ore_target()
 
+        best_visible_ore = self._select_reachable_ore(ct, my_pos, visible_ores, map_history)
         if self.ore_target is None:
-            self.ore_target = self._select_reachable_ore(ct, my_pos, visible_ores, map_history)
+            self.ore_target = best_visible_ore
             self._nav_dbg(ct, f"Selected ore target -> {self.ore_target}")
+        elif best_visible_ore is not None and best_visible_ore != self.ore_target:
+            current_dist_sq = (my_pos.x - self.ore_target[0]) ** 2 + (my_pos.y - self.ore_target[1]) ** 2
+            new_dist_sq = (my_pos.x - best_visible_ore[0]) ** 2 + (my_pos.y - best_visible_ore[1]) ** 2
+            if new_dist_sq < current_dist_sq:
+                old_target = self.ore_target
+                self._clear_ore_target()
+                self.ore_target = best_visible_ore
+                self._nav_dbg(
+                    ct,
+                    (
+                        "Retargeting to closer visible ore "
+                        f"from {old_target} dist_sq={current_dist_sq} "
+                        f"to {self.ore_target} dist_sq={new_dist_sq}"
+                    ),
+                )
 
         if self.ore_target is None:
             self._nav_dbg(ct, "No ore target; falling back to center exploration nav.")
@@ -301,6 +335,8 @@ class BridgeBuilder:
 
                     if ct.can_build_bridge(my_pos, bridge_target):
                         ct.build_bridge(my_pos, bridge_target)
+                        if ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE:
+                            self._launcher_pending_anchor = (my_pos.x, my_pos.y)
                         if self._is_on_friendly_core(
                             ct, bridge_target
                         ) or (
@@ -324,6 +360,8 @@ class BridgeBuilder:
                             my_pos, bridge_target
                         ):
                             ct.build_bridge(my_pos, bridge_target)
+                            if ENABLE_BRIDGE_PAD_LAUNCHER_DEFENSE:
+                                self._launcher_pending_anchor = (my_pos.x, my_pos.y)
                             if self._is_on_friendly_core(
                                 ct, bridge_target
                             ) or (
@@ -1487,6 +1525,348 @@ class BridgeBuilder:
         self._ore_nav_target = None
         self._ore_nav = TangentNav()
         self._clear_diagonal_alignment_state()
+
+    def _handle_pending_launcher_after_bridge(self, ct: Controller) -> bool:
+        if self._launcher_pending_anchor is None:
+            return False
+
+        anchor = Position(
+            self._launcher_pending_anchor[0],
+            self._launcher_pending_anchor[1],
+        )
+        my_pos = ct.get_position()
+        self._launcher_dbg(
+            ct,
+            (
+                "Pending launcher tick "
+                f"anchor=({anchor.x},{anchor.y}) "
+                f"bot=({my_pos.x},{my_pos.y}) "
+                f"action_cd={ct.get_action_cooldown()} move_cd={ct.get_move_cooldown()}"
+            ),
+        )
+        if self._has_adjacent_friendly_launcher(ct, my_pos):
+            self._nav_dbg(
+                ct,
+                (
+                    "Skipping pending defensive launcher: friendly launcher already "
+                    f"adjacent to bot at ({my_pos.x},{my_pos.y})."
+                ),
+            )
+            self._launcher_dbg(
+                ct,
+                (
+                    "Skipping launcher placement: friendly launcher already adjacent "
+                    f"to bot at ({my_pos.x},{my_pos.y})."
+                ),
+            )
+            self._launcher_pending_anchor = None
+            return False
+
+        width = ct.get_map_width()
+        height = ct.get_map_height()
+        adjacent: list[Position] = []
+        for dx, dy in _ADJACENT_DELTAS:
+            nx = anchor.x + dx
+            ny = anchor.y + dy
+            if 0 <= nx < width and 0 <= ny < height:
+                adjacent.append(Position(nx, ny))
+        self._launcher_dbg(
+            ct,
+            (
+                f"Anchor-adjacent tile count={len(adjacent)} "
+                f"anchor=({anchor.x},{anchor.y})"
+            ),
+        )
+
+        if not adjacent:
+            self._launcher_pending_anchor = None
+            self._launcher_dbg(
+                ct,
+                "No valid adjacent anchor tiles in bounds; clearing pending launcher.",
+            )
+            return False
+
+        actionable = [
+            pos for pos in adjacent if self._in_action_radius(my_pos, pos)
+        ]
+        self._launcher_dbg(
+            ct,
+            (
+                f"Actionable launcher tiles={len(actionable)} "
+                f"(action radius from bot=({my_pos.x},{my_pos.y}))."
+            ),
+        )
+        if not actionable:
+            self._nav_dbg(
+                ct,
+                (
+                    "Skipping pending defensive launcher: no adjacent anchor tiles "
+                    f"in action range from ({my_pos.x},{my_pos.y}) "
+                    f"for anchor=({anchor.x},{anchor.y})."
+                ),
+            )
+            self._launcher_pending_anchor = None
+            self._launcher_dbg(
+                ct,
+                (
+                    "No actionable launcher tiles around anchor; clearing pending. "
+                    f"anchor=({anchor.x},{anchor.y})"
+                ),
+            )
+            return False
+
+        launcher_affordable, _, _ = get_cost_affordability(ct, "get_launcher_cost")
+        self._launcher_dbg(
+            ct,
+            f"Launcher affordability check affordable={launcher_affordable}.",
+        )
+        if not launcher_affordable:
+            self._launcher_dbg(
+                ct,
+                (
+                    "Launcher unaffordable; holding position until affordable "
+                    "before continuing launcher placement flow."
+                ),
+            )
+            return True
+
+        empty_tiles: list[Position] = []
+        friendly_road_tiles: list[Position] = []
+        enemy_road_tiles: list[Position] = []
+        scan_parts: list[str] = []
+        for pos in actionable:
+            building_id = ct.get_tile_building_id(pos)
+            if building_id is None:
+                empty_tiles.append(pos)
+                scan_parts.append(f"({pos.x},{pos.y}):EMPTY")
+                continue
+            b_type = ct.get_entity_type(building_id)
+            b_team = ct.get_team(building_id)
+            if b_type != EntityType.ROAD:
+                scan_parts.append(
+                    (
+                        f"({pos.x},{pos.y}):{b_type.name}:"
+                        f"{'ALLY' if b_team == ct.get_team() else 'ENEMY'}:ignored"
+                    )
+                )
+                continue
+            if b_team == ct.get_team():
+                friendly_road_tiles.append(pos)
+                scan_parts.append(f"({pos.x},{pos.y}):ROAD:ALLY:candidate")
+            else:
+                enemy_road_tiles.append(pos)
+                scan_parts.append(f"({pos.x},{pos.y}):ROAD:ENEMY:candidate")
+        self._launcher_dbg(
+            ct,
+            (
+                "Launcher tile scan "
+                f"results=[{', '.join(scan_parts)}] "
+                f"counts(empty={len(empty_tiles)}, friendly_road={len(friendly_road_tiles)}, "
+                f"enemy_road={len(enemy_road_tiles)})"
+            ),
+        )
+
+        # Priority 1: any empty adjacent tile.
+        if empty_tiles:
+            self._launcher_dbg(
+                ct,
+                f"Priority 1 (empty tile) action_cd={ct.get_action_cooldown()}",
+            )
+            if ct.get_action_cooldown() != 0:
+                self._launcher_dbg(ct, "Waiting for action cooldown before launcher build.")
+                return False
+            for pos in empty_tiles:
+                self._launcher_dbg(
+                    ct,
+                    f"Trying launcher build at empty tile ({pos.x},{pos.y}).",
+                )
+                if ct.can_build_launcher(pos):
+                    ct.build_launcher(pos)
+                    self._launcher_pending_anchor = None
+                    self._nav_dbg(
+                        ct,
+                        (
+                            "Built defensive launcher adjacent to bridge anchor "
+                            f"at ({pos.x},{pos.y}) for anchor=({anchor.x},{anchor.y})."
+                        ),
+                    )
+                    self._launcher_dbg(
+                        ct,
+                        (
+                            "Built launcher successfully and cleared pending "
+                            f"at ({pos.x},{pos.y})."
+                        ),
+                    )
+                    return True
+                self._launcher_dbg(
+                    ct,
+                    (
+                        "Launcher build rejected by can_build_launcher "
+                        f"at ({pos.x},{pos.y}); trying next empty tile."
+                    ),
+                )
+            self._launcher_dbg(
+                ct,
+                "No empty tile accepted launcher build; keep pending and retry.",
+            )
+            return False
+
+        # Priority 2: no empty tile, clear friendly road first.
+        if friendly_road_tiles:
+            if ct.get_action_cooldown() != 0:
+                self._launcher_dbg(
+                    ct,
+                    (
+                        "Priority 2 (friendly road clear) waiting for action cooldown "
+                        f"action_cd={ct.get_action_cooldown()}."
+                    ),
+                )
+                return False
+            for pos in friendly_road_tiles:
+                self._launcher_dbg(
+                    ct,
+                    f"Trying to destroy friendly road at ({pos.x},{pos.y}).",
+                )
+                if ct.can_destroy(pos):
+                    ct.destroy(pos)
+                    self._nav_dbg(
+                        ct,
+                        (
+                            "Destroyed friendly road to free launcher tile "
+                            f"at ({pos.x},{pos.y}) for anchor=({anchor.x},{anchor.y})."
+                        ),
+                    )
+                    self._launcher_dbg(
+                        ct,
+                        (
+                            "Destroyed friendly road for launcher prep "
+                            f"at ({pos.x},{pos.y})."
+                        ),
+                    )
+                    return True
+                self._launcher_dbg(
+                    ct,
+                    f"Cannot destroy friendly road at ({pos.x},{pos.y}) this turn.",
+                )
+            self._launcher_dbg(
+                ct,
+                "No friendly road could be destroyed; keep pending and retry.",
+            )
+            return False
+
+        # Priority 3: no empty/friendly road, attack enemy road first.
+        if enemy_road_tiles:
+            if ct.get_action_cooldown() != 0:
+                self._launcher_dbg(
+                    ct,
+                    (
+                        "Priority 3 (enemy road attack) waiting for action cooldown "
+                        f"action_cd={ct.get_action_cooldown()}."
+                    ),
+                )
+                return False
+            for pos in enemy_road_tiles:
+                self._launcher_dbg(
+                    ct,
+                    f"Trying to attack enemy road at ({pos.x},{pos.y}).",
+                )
+                if self._attack_position(ct, pos):
+                    self._nav_dbg(
+                        ct,
+                        (
+                            "Attacked enemy road to free launcher tile "
+                            f"at ({pos.x},{pos.y}) for anchor=({anchor.x},{anchor.y})."
+                        ),
+                    )
+                    self._launcher_dbg(
+                        ct,
+                        f"Attacked enemy road at ({pos.x},{pos.y}) for launcher prep.",
+                    )
+                    return True
+                self._launcher_dbg(
+                    ct,
+                    (
+                        "Enemy road attack unavailable for tile "
+                        f"({pos.x},{pos.y}) this turn."
+                    ),
+                )
+            self._launcher_dbg(
+                ct,
+                "No enemy road could be attacked; keep pending and retry.",
+            )
+            return False
+
+        # Priority 4: nothing usable around anchor; skip and continue normal logic.
+        self._launcher_pending_anchor = None
+        self._launcher_dbg(
+            ct,
+            (
+                "Priority 4 fallback hit: no empty/friendly-road/enemy-road tiles; "
+                "clearing pending and continuing normal behavior."
+            ),
+        )
+        return False
+
+    @staticmethod
+    def _attack_position(ct: Controller, target: Position) -> bool:
+        can_attack = getattr(ct, "can_attack", None)
+        attack = getattr(ct, "attack", None)
+        if callable(can_attack) and callable(attack) and can_attack(target):
+            attack(target)
+            return True
+
+        can_fire = getattr(ct, "can_fire", None)
+        fire = getattr(ct, "fire", None)
+        if callable(can_fire) and callable(fire) and can_fire(target):
+            fire(target)
+            return True
+
+        return False
+
+    @staticmethod
+    def _has_adjacent_friendly_launcher(ct: Controller, center: Position) -> bool:
+        width = ct.get_map_width()
+        height = ct.get_map_height()
+        for dx, dy in _ADJACENT_DELTAS:
+            nx = center.x + dx
+            ny = center.y + dy
+            if not (0 <= nx < width and 0 <= ny < height):
+                continue
+            pos = Position(nx, ny)
+            building_id = ct.get_tile_building_id(pos)
+            if building_id is None:
+                continue
+            if ct.get_team(building_id) != ct.get_team():
+                continue
+            if ct.get_entity_type(building_id) == EntityType.LAUNCHER:
+                return True
+        return False
+
+    def _launcher_dbg(self, ct: Controller, msg: str) -> None:
+        if not self._launcher_dbg_enabled(ct):
+            return
+        current_round = ct.get_current_round()
+        pos = ct.get_position()
+        print(
+            (
+                f"[R{current_round}][ID={ct.get_id()}][LauncherPad][{pos.x},{pos.y}] "
+                f"{msg}"
+            ),
+            file=sys.stderr,
+        )
+
+    def _launcher_dbg_enabled(self, ct: Controller) -> bool:
+        if not ENABLE_BRIDGE_PAD_LAUNCHER_LOGS:
+            return False
+        current_round = ct.get_current_round()
+        in_round_window = (
+            self._NAV_DEBUG_START_ROUND <= current_round <= self._NAV_DEBUG_END_ROUND
+        )
+        if not in_round_window:
+            return False
+        if not self._NAV_DEBUG_ONLY_TARGET_ID:
+            return True
+        return ct.get_id() == self._NAV_DEBUG_TARGET_UNIT_ID
 
     def _nav_dbg(self, ct: Controller, msg: str) -> None:
         if not self._nav_dbg_enabled(ct):

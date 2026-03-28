@@ -101,7 +101,10 @@ class Hound:
         core_pos: tuple[int, int] | None,
         known_symmetry: int | None,
     ) -> tuple[bool, tuple[int, int] | None]:
-        building_id = ct.get_tile_building_id(sentinel_tile)
+        try:
+            building_id = ct.get_tile_building_id(sentinel_tile)
+        except Exception:
+            return False, enemy_core_target
         if building_id is not None:
             try:
                 b_type = ct.get_entity_type(building_id)

@@ -66,7 +66,7 @@ class TangentNav:
     _DOUBLE_STEP_REPULSE_COST = 20_000
     _RECENT_TILE_PENALTY = 300
     # Reduced epsilon to prevent premature M-line exits in tight corridors
-    _M_LINE_EPS = 0.1
+    _M_LINE_EPS = 1.0
 
     def __init__(self) -> None:
         self.target: tuple[int, int] | None = None
