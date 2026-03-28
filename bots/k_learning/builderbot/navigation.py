@@ -1,6 +1,5 @@
-from enum import Enum
+from enum import Enum, EnumType
 import heapq
-from math import e
 from sys import stderr
 
 from cambc import Controller, Direction, EntityType, Position, Team, Environment
@@ -119,17 +118,14 @@ class Navigation:
     def __init__(self,w,h):
         self.w = w
         self.h = h
-        self.map_lut = [0] * (w * h)
+        self.map_lut = [[0]*h for _ in range(w)]
         self.quad_scaling = 5
         self.current_pos: Position | None = None
         self.sym = None
         self.pq = []
         self.visited = set()
-        self.hugging_wall = 0
-        self.start_pos = None
-        self.hit_dist = None
-        self.hit_pos = None
-        self.last_dir = None
+        
+        self.path_cahce= []
     
     def _get_idx(self, x: int, y: int) -> int:
         return y * self.w + x
@@ -137,89 +133,88 @@ class Navigation:
     def in_bounds(self,x:int,y:int):
         return 0 <= x < self.w and 0 <= y < self.h
 
-    def update_info(self,ct:Controller,current_pos:Position,nearby_tiles:list[Position],sym:SymmetryAnalyzer):
+    def update_info(self,ct:Controller,current_pos:Position,nearby_tiles:list[Position],nearby_buildings:list[int]):
         self.current_pos = current_pos
-        self.sym = sym
-        
         # Update LUT
         for pos in nearby_tiles:
-            idx = self._get_idx(*pos)
-            self.map_lut[idx] = 1
-        self.map_lut[self._get_idx(current_pos.x,current_pos.y)] = 2
-    
-    def get_lut(self,x,y):
-        return self.map_lut[self._get_idx(x,y)]
+            x,y = pos
+            tile_env = ct.get_tile_env(pos)
+            match tile_env:
+                case Environment.EMPTY:
+                    self.map_lut[x][y] = 1
+                case Environment.ORE_TITANIUM:
+                    self.map_lut[x][y] = 2
+                case Environment.ORE_AXIONITE:
+                    self.map_lut[x][y] = 3
+                case Environment.WALL:
+                    self.map_lut[x][y] = 4
+
+        for building in nearby_buildings:
+            pos = ct.get_position(building)
+            x,y = pos
+            btype = ct.get_entity_type(building)
+            match btype:
+                case EntityType.CORE:
+                    team = ct.get_team(building) == ct.get_team()
+                    if team:
+                        continue
+                    self.map_lut[x][y] = 5
+                    for direction in DIRECTIONS:
+                        x,y = pos.add(direction)
+                        self.map_lut[x][y] = 5
+                case EntityType.HARVESTER:
+                    self.map_lut[x][y] = 6
+
+    def a_star(self,target_pos:Position):
+        queue = [(0,(self.current_pos.x,self.current_pos.y))]
+        check = {(self.current_pos.x,self.current_pos.y):0}
+        full_path = {}
+        stopped_at = (target_pos.x,target_pos.y)
+        while queue:
+            top = heapq.heappop(queue)
+            reached_target = top[1] == stopped_at
+            goes_into_unknown = self.map_lut[top[1][0]][top[1][1]] == 0
+            if reached_target or goes_into_unknown:
+                stopped_at = top[1]
+                break
+            elapsed_dist = check[top[1]]
+            for direction in DIRECTIONS:
+                deltas = direction.delta()
+                neighbor = ( top[1][0] + deltas[0],top[1][1] + deltas[1] )
+                if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h ) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
+                    continue
+                new_dist = 1 + elapsed_dist
+                rank = 1 + max(abs(neighbor[0]-target_pos.x),abs(neighbor[1]-target_pos.y))
+                if neighbor not in check or new_dist < check[neighbor]:
+                    check[neighbor] = new_dist
+                    full_path[neighbor] = top[1]
+                    heapq.heappush(queue,(rank,neighbor))
+
+        path = []
+        current = stopped_at
+        while current != (self.current_pos.x, self.current_pos.y):
+            path.insert(0,current)
+            current = full_path[current]
+        self.path_cahce = path
 
     def move(self,ct:Controller,target_pos:Position):
         self.current_pos = ct.get_position()
-        m_dir = self.current_pos.direction_to(target_pos)
-        next_pos = self.current_pos.add(m_dir)
-        if self.hugging_wall == 0:
-            self.start_pos = self.current_pos
-            if ct.can_move(m_dir):
-                ct.move(m_dir)
-                return True
-            elif ct.can_build_road(next_pos):
-                ct.build_road(next_pos)
-                ct.move(m_dir)
-                return True
+        if not self.path_cahce:
+            self.a_star(target_pos)
+        next_pos = Position(*self.path_cahce.pop(0))
+        direction = self.current_pos.direction_to(next_pos)
+        if not ct.can_move(direction) or not ct.can_build_road(next_pos):
+            self.a_star(target_pos)
 
-            self.hugging_wall = 1
-            self.hit_dist = self.current_pos.distance_squared(target_pos)
-            self.hit_pos = self.current_pos
-            self.last_dir = m_dir
-
-
-        dx = target_pos.x - self.start_pos.x
-        dy = target_pos.y - self.start_pos.y
-        cx = self.current_pos.x - self.start_pos.x
-        cy = self.current_pos.y - self.start_pos.y
-
-        on_mline = None
-        # Cross product should be ~0 for collinear points
-        cross = dx * cy - dy * cx
-        if abs(cross) > 1:  # tolerance of 1 for grid cells
-            on_mline = False
-
-        # Dot product to check current is between start and target
-        dot = cx * dx + cy * dy
-        len_sq = dx * dx + dy * dy
-        on_mline = 0 <= dot <= len_sq
-
-
-        current_dist = self.current_pos.distance_squared(target_pos)
-        if ( self.current_pos != self.hit_pos and current_dist < self.hit_dist and on_mline):
-            print("EXITING")
-            if ct.can_move(m_dir):
-                ct.move(m_dir)
-                self.hugging_wall = 0
-                return True
-            elif ct.can_build_road(next_pos):
-                ct.build_road(next_pos)
-                ct.move(m_dir)
-                self.hugging_wall = 0
-                return True
-        
-        for _ in range(9):
-            rs = self.last_dir.rotate_right()
-            right_pos =  self.current_pos.add(rs)
-            right_env = ct.get_tile_env(right_pos) 
-            right_build_id = ct.get_tile_building_id(right_pos) 
-            right_build = ct.get_entity_type(right_build_id) if right_build_id else None
-            hugging_enemy_core = right_build==EntityType.CORE and ct.get_team(right_build_id) != ct.get_team()
-            next_pos = self.current_pos.add(self.last_dir)
-            if right_env == Environment.WALL or hugging_enemy_core :
-                if ct.can_move(self.last_dir):
-                    ct.move(self.last_dir)
-                    return True
-                elif ct.can_build_road(next_pos):
-                    ct.build_road(next_pos)
-                    ct.move(self.last_dir)
-                    return True
-            self.last_dir = self.last_dir.rotate_left()
-            
-
-        raise Exception("Failed to move")
+        next_pos = Position(*self.path_cahce.pop(0))
+        direction = self.current_pos.direction_to(next_pos)
+        if ct.can_move(direction):
+            ct.move(direction)
+            return True
+        elif ct.can_build_road(next_pos):
+            ct.build_road(next_pos)
+            ct.move(direction)
+            return True
 
     def get_neighbors(self,ct:Controller):
         quads = [
@@ -254,8 +249,11 @@ class Navigation:
         else:
             tpos = Position(*top)
             dist = self.current_pos.distance_squared(tpos)
-            if dist <= ct.get_vision_radius_sq() and ct.get_tile_env(tpos)  == Environment.WALL:
-                self.pq.pop(0)
+            if dist <= ct.get_vision_radius_sq():
+                building = ct.get_tile_building_id(tpos)
+                impassible = ct.get_entity_type(building) in (EntityType.CORE,EntityType.HARVESTER) if building else False
+                if ct.get_tile_env(tpos)  == Environment.WALL or impassible:
+                    self.pq.pop(0)
         
         # Update distances
         new_pq = []
