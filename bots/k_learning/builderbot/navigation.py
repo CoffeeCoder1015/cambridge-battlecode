@@ -1,3 +1,4 @@
+import array
 from enum import Enum, EnumType
 import heapq
 from sys import stderr
@@ -167,7 +168,10 @@ class Navigation:
 
     def a_star(self,target_pos:Position):
         queue = [(0,(self.current_pos.x,self.current_pos.y))]
-        check = {(self.current_pos.x,self.current_pos.y):0}
+
+        check = array.array('h',[-1]) * (self.w * self.h)
+        check[self._get_idx(self.current_pos.x,self.current_pos.y)] = 0
+
         full_path = {}
         stopped_at = (target_pos.x,target_pos.y)
         while queue:
@@ -177,7 +181,7 @@ class Navigation:
             if reached_target or goes_into_unknown:
                 stopped_at = top[1]
                 break
-            elapsed_dist = check[top[1]]
+            elapsed_dist = check[self._get_idx(*top[1])]
             for direction in DIRECTIONS:
                 deltas = direction.delta()
                 neighbor = ( top[1][0] + deltas[0],top[1][1] + deltas[1] )
@@ -185,8 +189,11 @@ class Navigation:
                     continue
                 new_dist = 1 + elapsed_dist
                 rank = 1 + max(abs(neighbor[0]-target_pos.x),abs(neighbor[1]-target_pos.y))
-                if neighbor not in check or new_dist < check[neighbor]:
-                    check[neighbor] = new_dist
+
+                neighbor_idx = self._get_idx(*neighbor)
+                neighbor_dist = check[neighbor_idx]
+                if neighbor_dist == -1 or new_dist < neighbor_dist:
+                    check[neighbor_idx] = new_dist
                     full_path[neighbor] = top[1]
                     heapq.heappush(queue,(rank,neighbor))
 
