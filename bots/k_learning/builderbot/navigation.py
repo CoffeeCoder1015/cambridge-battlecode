@@ -125,6 +125,7 @@ class Navigation:
 
         self.pq = []
 
+        self.last_target = None
         self.visited = set()
         self.path_cahce= []
         
@@ -235,7 +236,8 @@ class Navigation:
 
     def move(self,ct:Controller,target_pos:Position):
         self.current_pos = ct.get_position()
-        if not self.path_cahce:
+        if not self.path_cahce or self.last_target != target_pos:
+            self.last_target = target_pos
             self.a_star(target_pos)
         next_pos = Position(*self.path_cahce.pop(0))
         direction = self.current_pos.direction_to(next_pos)
@@ -284,14 +286,8 @@ class Navigation:
         if (self.current_pos.x,self.current_pos.y) == top:
             self.pq.pop(0)
             self.pq.extend(self.get_neighbors(ct))
-        else:
-            tpos = Position(*top)
-            dist = self.current_pos.distance_squared(tpos)
-            if dist <= ct.get_vision_radius_sq():
-                building = ct.get_tile_building_id(tpos)
-                impassible = ct.get_entity_type(building) in (EntityType.CORE,EntityType.HARVESTER) if building else False
-                if ct.get_tile_env(tpos)  == Environment.WALL or impassible:
-                    self.pq.pop(0)
+        elif self.map_lut[top[0]][top[1]] >= 4: # Impassible
+            self.pq.pop(0)
         
         # Update distances
         new_pq = []
