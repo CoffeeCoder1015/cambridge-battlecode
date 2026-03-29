@@ -1,4 +1,5 @@
 import array
+from collections import deque
 from enum import Enum, EnumType
 import heapq
 from sys import stderr
@@ -120,13 +121,17 @@ class Navigation:
         self.w = w
         self.h = h
         self.map_lut = [[0]*h for _ in range(w)]
-        self.quad_scaling = 5
         self.current_pos: Position | None = None
-        self.sym = None
+
         self.pq = []
+
         self.visited = set()
-        
         self.path_cahce= []
+        
+        self.bucket_n = self.w * self.h
+        self.min_ptr = 0
+        self.buckets = [[] for _ in range(self.bucket_n)]
+        self.open_pos = set()
     
     def _get_idx(self, x: int, y: int) -> int:
         return y * self.w + x
@@ -166,16 +171,35 @@ class Navigation:
                 case EntityType.HARVESTER:
                     self.map_lut[x][y] = 6
 
+    def reset_pq(self):
+        self.min_ptr = 0
+        while self.open_pos:
+            top = self.open_pos.pop()
+            self.buckets[top] = []
+    
+    def push_pq(self,rank,item):
+        self.open_pos.add(rank)
+        self.buckets[rank].append(item)
+    
+    def pop_pq(self):
+        while not self.buckets[self.min_ptr]:
+            self.min_ptr+=1
+        top_item = self.buckets[self.min_ptr].pop()
+        if len(self.buckets[self.min_ptr]) == 0:
+            self.open_pos.remove(self.min_ptr)
+        return ( self.min_ptr,top_item )         
+    
     def a_star(self,target_pos:Position):
-        queue = [(0,(self.current_pos.x,self.current_pos.y))]
+        self.reset_pq()
+        self.push_pq(0,(self.current_pos.x,self.current_pos.y))
 
         check = array.array('h',[-1]) * (self.w * self.h)
         check[self._get_idx(self.current_pos.x,self.current_pos.y)] = 0
 
         full_path = {}
         stopped_at = (target_pos.x,target_pos.y)
-        while queue:
-            top = heapq.heappop(queue)
+        while self.open_pos:
+            top = self.pop_pq()
             reached_target = top[1] == stopped_at
             goes_into_unknown = self.map_lut[top[1][0]][top[1][1]] == 0
             if reached_target or goes_into_unknown:
@@ -188,14 +212,14 @@ class Navigation:
                 if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h ) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
                     continue
                 new_dist = 1 + elapsed_dist
-                rank = 1 + max(abs(neighbor[0]-target_pos.x),abs(neighbor[1]-target_pos.y))
+                rank = new_dist + max(abs(neighbor[0]-target_pos.x),abs(neighbor[1]-target_pos.y))
 
                 neighbor_idx = self._get_idx(*neighbor)
                 neighbor_dist = check[neighbor_idx]
                 if neighbor_dist == -1 or new_dist < neighbor_dist:
                     check[neighbor_idx] = new_dist
                     full_path[neighbor] = top[1]
-                    heapq.heappush(queue,(rank,neighbor))
+                    self.push_pq(rank,neighbor)
 
         path = []
         current = stopped_at
