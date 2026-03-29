@@ -228,8 +228,9 @@ class Navigation:
         path = []
         current = stopped_at
         while current != (self.current_pos.x, self.current_pos.y):
-            path.insert(0,current)
+            path.append(current)
             current = full_path[current]
+        path.reverse()
         self.path_cahce = path
 
     def move(self,ct:Controller,target_pos:Position):
