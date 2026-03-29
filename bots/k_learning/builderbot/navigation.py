@@ -234,11 +234,13 @@ class Navigation:
             self.a_star(target_pos)
         next_pos = Position(*self.path_cahce.pop(0))
         direction = self.current_pos.direction_to(next_pos)
-        if not ct.can_move(direction) or not ct.can_build_road(next_pos):
+        can_move = ct.can_move(direction) or ct.can_build_road(next_pos)
+        if not can_move:
             self.a_star(target_pos)
+            # TODO: path_cache empty guard
+            next_pos = Position(*self.path_cahce.pop(0))
+            direction = self.current_pos.direction_to(next_pos)
 
-        next_pos = Position(*self.path_cahce.pop(0))
-        direction = self.current_pos.direction_to(next_pos)
         if ct.can_move(direction):
             ct.move(direction)
             return True
