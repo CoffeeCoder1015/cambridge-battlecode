@@ -217,13 +217,13 @@ class Navigation:
                 if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h ) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
                     continue
                 new_dist = 1 + elapsed_dist
-                rank = new_dist + max(abs(neighbor[0]-target_pos.x),abs(neighbor[1]-target_pos.y))
 
                 neighbor_idx = self._get_idx(*neighbor)
                 neighbor_dist = check[neighbor_idx]
                 if neighbor_dist == -1 or new_dist < neighbor_dist:
                     check[neighbor_idx] = new_dist
                     full_path[neighbor] = top[1]
+                    rank = new_dist + max(abs(neighbor[0]-target_pos.x),abs(neighbor[1]-target_pos.y))
                     self.push_pq(rank,neighbor)
 
         path = []
