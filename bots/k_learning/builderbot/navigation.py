@@ -130,6 +130,7 @@ class Navigation:
         
         self.bucket_n = self.w * self.h
         self.min_ptr = 0
+        self.inserted_items = 0
         self.buckets = [[] for _ in range(self.bucket_n)]
         self.open_pos = set()
     
@@ -173,6 +174,7 @@ class Navigation:
 
     def reset_pq(self):
         self.min_ptr = 0
+        self.inserted_items = 0
         while self.open_pos:
             top = self.open_pos.pop()
             self.buckets[top] = []
@@ -180,6 +182,7 @@ class Navigation:
     def push_pq(self,rank,item):
         self.open_pos.add(rank)
         self.buckets[rank].append(item)
+        self.inserted_items += 1
     
     def pop_pq(self):
         while not self.buckets[self.min_ptr]:
@@ -187,6 +190,7 @@ class Navigation:
         top_item = self.buckets[self.min_ptr].pop()
         if len(self.buckets[self.min_ptr]) == 0:
             self.open_pos.remove(self.min_ptr)
+        self.inserted_items -= 1
         return ( self.min_ptr,top_item )         
     
     def a_star(self,target_pos:Position):
