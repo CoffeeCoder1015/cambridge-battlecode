@@ -231,7 +231,6 @@ class Navigation:
         while current != (self.current_pos.x, self.current_pos.y):
             path.append(current)
             current = full_path[current]
-        path.reverse()
         self.path_cahce = path
 
     def move(self,ct:Controller,target_pos:Position):
@@ -239,13 +238,13 @@ class Navigation:
         if not self.path_cahce or self.last_target != target_pos:
             self.last_target = target_pos
             self.a_star(target_pos)
-        next_pos = Position(*self.path_cahce.pop(0))
+        next_pos = Position(*self.path_cahce.pop())
         direction = self.current_pos.direction_to(next_pos)
         can_move = ct.can_move(direction) or ct.can_build_road(next_pos)
         if not can_move:
             self.a_star(target_pos)
             # TODO: path_cache empty guard
-            next_pos = Position(*self.path_cahce.pop(0))
+            next_pos = Position(*self.path_cahce.pop())
             direction = self.current_pos.direction_to(next_pos)
 
         if ct.can_move(direction):
