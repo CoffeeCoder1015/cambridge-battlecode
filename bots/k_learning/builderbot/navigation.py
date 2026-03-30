@@ -453,7 +453,7 @@ class Navigation:
             ct.move(direction)
             return True
 
-    def get_neighbors(self,root_pos=None):
+    def get_neighbors(self,ct:Controller,root_pos=None):
         start_pos = self.current_pos
         if root_pos:
             start_pos = root_pos
@@ -472,6 +472,7 @@ class Navigation:
             if self.in_bounds(*q) and q not in self.visited:
                 neighbors.append((0,q))
                 self.visited.add(q)
+                self.permanent_scores[q] = ct.get_current_round()
         return neighbors
 
     def explore(self,ct:Controller):
@@ -479,15 +480,15 @@ class Navigation:
             ct.draw_indicator_dot(Position(*p),255,0,0)
 
         if not self.visited:
-            self.pq = self.get_neighbors()
+            self.pq = self.get_neighbors(ct)
 
         top = self.pq[0][1]
         if (self.current_pos.x,self.current_pos.y) == top:
             self.pq.pop(0)
-            self.pq.extend(self.get_neighbors())
+            self.pq.extend(self.get_neighbors(ct))
         elif self.map_lut[top[0]][top[1]] >= 4: # Impassible
             popped= self.pq.pop(0)
-            self.pq.extend(self.get_neighbors(Position(*popped[1])))
+            self.pq.extend(self.get_neighbors(ct,Position(*popped[1])))
         
         # Update distances
         new_pq = []
