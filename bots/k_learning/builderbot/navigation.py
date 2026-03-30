@@ -131,6 +131,7 @@ class Navigation:
         self.visited = set()
         self.path_cahce= []
         
+        self.beam_width = 32
         self.bucket_n = self.w * self.h
         self.min_ptr = 0
         self.max_ptr = 0
@@ -243,17 +244,80 @@ class Navigation:
             current = full_path[current]
         self.path_cahce = path
 
+    def beam_search(self, target_pos: Position):
+        start = (self.current_pos.x, self.current_pos.y)
+        check = [-1] * (self.w * self.h)
+        check[self._get_idx(*start)] = 0
+
+        full_path = {}
+        stopped_at = start
+        beam = [start]
+
+        while beam:
+            next_layer = []
+            next_seen = set()
+
+            for node in beam:
+                reached_target = node == (target_pos.x, target_pos.y)
+                goes_into_unknown = self.map_lut[node[0]][node[1]] == 0
+                if reached_target or goes_into_unknown:
+                    stopped_at = node
+                    beam = []
+                    next_layer = []
+                    break
+
+                elapsed_dist = check[self._get_idx(*node)]
+                for deltas in DELTAS:
+                    neighbor = (node[0] + deltas[0], node[1] + deltas[1])
+                    if not self.in_bounds(*neighbor) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
+                        continue
+
+                    new_dist = elapsed_dist + 1
+                    neighbor_idx = self._get_idx(*neighbor)
+                    neighbor_dist = check[neighbor_idx]
+                    if neighbor_dist != -1 and new_dist >= neighbor_dist:
+                        continue
+
+                    check[neighbor_idx] = new_dist
+                    full_path[neighbor] = node
+                    if neighbor not in next_seen:
+                        next_seen.add(neighbor)
+                        score = new_dist + max(abs(neighbor[0] - target_pos.x), abs(neighbor[1] - target_pos.y))
+                        heuristic = max(abs(neighbor[0] - target_pos.x), abs(neighbor[1] - target_pos.y))
+                        heapq.heappush(next_layer, (-score, -heuristic, neighbor))
+                        if len(next_layer) > self.beam_width:
+                            heapq.heappop(next_layer)
+
+            if not next_layer:
+                continue
+
+            beam = [pos for _, _, pos in sorted(next_layer, reverse=True)]
+            stopped_at = beam[0]
+
+        path = []
+        current = stopped_at
+        while current != start and current in full_path:
+            path.append(current)
+            current = full_path[current]
+        self.path_cahce = path
+
     def move(self,ct:Controller,target_pos:Position):
         self.current_pos = ct.get_position()
         if not self.path_cahce or self.last_target != target_pos:
             self.last_target = target_pos
-            self.a_star(target_pos)
+            # self.a_star(target_pos)
+            self.beam_search(target_pos)
+        if not self.path_cahce:
+            return False
         next_pos = Position(*self.path_cahce.pop())
         direction = self.current_pos.direction_to(next_pos)
         can_move = ct.can_move(direction) or ct.can_build_road(next_pos)
         if not can_move:
-            self.a_star(target_pos)
+            # self.a_star(target_pos)
+            self.beam_search(target_pos)
             # TODO: path_cache empty guard
+            if not self.path_cahce:
+                return False
             next_pos = Position(*self.path_cahce.pop())
             direction = self.current_pos.direction_to(next_pos)
 
