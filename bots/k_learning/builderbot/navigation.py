@@ -129,11 +129,11 @@ class Navigation:
         self.current_pos: Position | None = None
 
         self.pq = []
+        self.permanent_scores = {}
 
         self.last_target = None
         self.visited = set()
         
-        self.beam_width = 32
         self.bucket_n = self.w * self.h
         self.min_ptr = 0
         self.max_ptr = 0
@@ -420,7 +420,7 @@ class Navigation:
         current_idx = self._get_idx(self.current_pos.x, self.current_pos.y)
         if self.last_target != target_pos or not self._has_route_step(current_idx):
             self.last_target = target_pos
-            self.a_star_bounded_frontier(target_pos)
+            self.a_star_cutoff(target_pos)
             # self.a_star(target_pos)
         if not self._has_route_step(current_idx):
             return False
@@ -430,7 +430,7 @@ class Navigation:
         can_move = ct.can_move(direction) or ct.can_build_road(next_pos)
         if not can_move:
             self._invalidate_route()
-            self.a_star_bounded_frontier(target_pos)
+            self.a_star_cutoff(target_pos)
             # self.a_star(target_pos)
             current_idx = self._get_idx(self.current_pos.x, self.current_pos.y)
             if not self._has_route_step(current_idx):
@@ -471,7 +471,7 @@ class Navigation:
         for _,p in self.pq:
             ct.draw_indicator_dot(Position(*p),255,0,0)
 
-        if not self.pq:
+        if not self.visited:
             self.pq = self.get_neighbors()
 
         top = self.pq[0][1]
@@ -479,15 +479,26 @@ class Navigation:
             self.pq.pop(0)
             self.pq.extend(self.get_neighbors())
         elif self.map_lut[top[0]][top[1]] >= 4: # Impassible
-            self.pq.pop(0)
+            popped= self.pq.pop(0)
+            self.pq.extend(self.get_neighbors(Position(*popped[1])))
         
         # Update distances
         new_pq = []
         for i in range(len(self.pq)):
             _,pos = self.pq[i]
-            new_val = max(abs(self.current_pos.x-pos[0]),abs(self.current_pos.y-pos[1]))
-            heapq.heappush(new_pq,(new_val,pos))
+            perma_score = self.permanent_scores.get(pos,0)
+            new_val = max(abs(self.current_pos.x-pos[0]),abs(self.current_pos.y-pos[1])) 
+            rank = new_val + perma_score
+            heapq.heappush(new_pq,(rank,pos))
         self.pq = new_pq
         final_target = Position(*self.pq[0][1])
         ct.draw_indicator_line(self.current_pos,final_target,0,255,0)
         self.move(ct,final_target)
+        # Pop inaccessible targets
+        if ct.get_position() == self.current_pos:
+            pos = self.pq[0][1]
+            if self.map_lut[pos[0]][pos[1]] > 0 and self.permanent_scores.get(pos,0) < self.bucket_n:
+                self.permanent_scores[pos] = 2* self.permanent_scores.get(pos,100)
+            else:
+                self.pq.pop(0)
+
