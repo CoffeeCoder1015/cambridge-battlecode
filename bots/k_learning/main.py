@@ -10,6 +10,10 @@ This bot:
 """
 
 
+import os
+if os.getenv("PROFILE"):
+    import cProfile
+
 from cambc import Controller, EntityType
 
 from builderbot import BuilderBot
@@ -23,9 +27,20 @@ mapping = {
 class Player:
     def __init__(self):
         self.active:Core | BuilderBot = None
+        self.profiler = None
 
     def run(self, ct: Controller) -> None:
         etype = ct.get_entity_type()
         if self.active is None:
             self.active = mapping[etype]()
+        if os.getenv("PROFILE"):
+            if ct.get_entity_type() == EntityType.BUILDER_BOT:
+                if not self.profiler:
+                    self.profiler = cProfile.Profile()
+                self.profiler.enable()  # just run it the whole time
         self.active.run(ct)
+        if os.getenv("PROFILE"):
+            if ct.get_entity_type() == EntityType.BUILDER_BOT:
+                self.profiler.disable()
+                if ct.get_current_round() == 100:  # dump at round 500 and stop
+                    self.profiler.dump_stats("profile.prof")
