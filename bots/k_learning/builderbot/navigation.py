@@ -453,6 +453,9 @@ class Navigation:
             ct.move(direction)
             return True
 
+        # White dot when failed to move
+        ct.draw_indicator_dot(self.current_pos,255,255,255)
+
     def get_neighbors(self,ct:Controller,root_pos=None):
         start_pos = self.current_pos
         if root_pos:
