@@ -11,6 +11,7 @@ This bot:
 
 
 import os
+import time
 if os.getenv("PROFILE"):
     import cProfile
 
@@ -28,6 +29,7 @@ class Player:
     def __init__(self):
         self.active:Core | BuilderBot = None
         self.profiler = None
+        self.te = 0
 
     def run(self, ct: Controller) -> None:
         etype = ct.get_entity_type()
@@ -38,7 +40,11 @@ class Player:
                 if not self.profiler:
                     self.profiler = cProfile.Profile()
                 self.profiler.enable()  # just run it the whole time
+        start = time.time_ns()
         self.active.run(ct)
+        end = time.time_ns()
+        self.te = max(self.te,end-start)
+        print(self.te)
         if os.getenv("PROFILE"):
             if ct.get_entity_type() == EntityType.BUILDER_BOT:
                 self.profiler.disable()
