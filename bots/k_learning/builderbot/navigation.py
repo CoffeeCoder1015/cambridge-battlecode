@@ -200,7 +200,7 @@ class Navigation:
         self.reset_pq()
         self.push_pq(0,(self.current_pos.x,self.current_pos.y))
 
-        check = array.array('h',[-1]) * (self.w * self.h)
+        check = [-1] * (self.w * self.h)
         check[self._get_idx(self.current_pos.x,self.current_pos.y)] = 0
 
         full_path = {}
@@ -256,16 +256,19 @@ class Navigation:
             ct.move(direction)
             return True
 
-    def get_neighbors(self,ct:Controller):
+    def get_neighbors(self,root_pos=None):
+        start_pos = self.current_pos
+        if root_pos:
+            start_pos = root_pos
         quads = [
-            (self.current_pos.x, self.current_pos.y - 5),
-            (self.current_pos.x + 5, self.current_pos.y - 5),
-            (self.current_pos.x + 5, self.current_pos.y),
-            (self.current_pos.x + 5, self.current_pos.y + 5),
-            (self.current_pos.x, self.current_pos.y + 5),
-            (self.current_pos.x - 5, self.current_pos.y + 5),
-            (self.current_pos.x - 5, self.current_pos.y),
-            (self.current_pos.x - 5, self.current_pos.y - 5),
+            (start_pos.x, start_pos.y - 5),
+            (start_pos.x + 5, start_pos.y - 5),
+            (start_pos.x + 5, start_pos.y),
+            (start_pos.x + 5, start_pos.y + 5),
+            (start_pos.x, start_pos.y + 5),
+            (start_pos.x - 5, start_pos.y + 5),
+            (start_pos.x - 5, start_pos.y),
+            (start_pos.x - 5, start_pos.y - 5),
         ]
         neighbors = []
         for q in quads:
@@ -279,13 +282,12 @@ class Navigation:
             ct.draw_indicator_dot(Position(*p),255,0,0)
 
         if not self.pq:
-            self.pq = self.get_neighbors(ct)
-            
-        
+            self.pq = self.get_neighbors()
+
         top = self.pq[0][1]
         if (self.current_pos.x,self.current_pos.y) == top:
             self.pq.pop(0)
-            self.pq.extend(self.get_neighbors(ct))
+            self.pq.extend(self.get_neighbors())
         elif self.map_lut[top[0]][top[1]] >= 4: # Impassible
             self.pq.pop(0)
         
@@ -293,7 +295,7 @@ class Navigation:
         new_pq = []
         for i in range(len(self.pq)):
             _,pos = self.pq[i]
-            new_val = self.current_pos.distance_squared(Position(*pos)) 
+            new_val = max(abs(self.current_pos.x-pos[0]),abs(self.current_pos.y-pos[1]))
             heapq.heappush(new_pq,(new_val,pos))
         self.pq = new_pq
         final_target = Position(*self.pq[0][1])
