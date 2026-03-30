@@ -58,7 +58,7 @@ class BuilderBot:
         # get nearby environment and insert obstacles and ores into LUT
         self.symmetry_analyzer.update_symmetry(ct, nearby_tiles, nearby_units)
         
-        self.nav.update_info(ct,current_pos,nearby_tiles,nearby_buildings)
+        ore_locations = self.nav.update_info(ct,current_pos,nearby_tiles,nearby_buildings)
         self.nav.explore(ct)
 
         # draw possible enemy core positions

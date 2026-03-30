@@ -209,6 +209,9 @@ class Navigation:
 
     def update_info(self,ct:Controller,current_pos:Position,nearby_tiles:list[Position],nearby_buildings:list[int]):
         self.current_pos = current_pos
+        
+        ore_locations = []
+
         # Update LUT
         for pos in nearby_tiles:
             x,y = pos
@@ -218,6 +221,8 @@ class Navigation:
                     self.map_lut[x][y] = 1
                 case Environment.ORE_TITANIUM:
                     self.map_lut[x][y] = 2
+                    dist = max(abs(self.current_pos.x-x),abs(self.current_pos.y-y))
+                    heapq.heappush(ore_locations,(dist,(x,y)))
                 case Environment.ORE_AXIONITE:
                     self.map_lut[x][y] = 3
                 case Environment.WALL:
@@ -238,6 +243,8 @@ class Navigation:
                         self.map_lut[x][y] = 5
                 case EntityType.HARVESTER:
                     self.map_lut[x][y] = 6
+
+        return ore_locations
 
     def reset_pq(self):
         self.min_ptr = self.bucket_n
