@@ -290,7 +290,7 @@ class Navigation:
         search_epoch = self._begin_search()
         self.push_pq(0,start)
 
-        check = [-1] * (self.w * self.h)
+        check = array.array("h", [-1]) * self.bucket_n
         check[start_idx] = 0
 
         stopped_at = (target_pos.x,target_pos.y)
