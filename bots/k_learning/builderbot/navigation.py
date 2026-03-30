@@ -116,6 +116,8 @@ CARDINALS = [
 ]
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 
+DELTAS = [ (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), ]
+
 class Navigation:
     def __init__(self,w,h):
         self.w = w
@@ -211,8 +213,7 @@ class Navigation:
                 stopped_at = top[1]
                 break
             elapsed_dist = check[self._get_idx(*top[1])]
-            for direction in DIRECTIONS:
-                deltas = direction.delta()
+            for deltas in DELTAS:
                 neighbor = ( top[1][0] + deltas[0],top[1][1] + deltas[1] )
                 if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h ) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
                     continue
