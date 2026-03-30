@@ -185,7 +185,8 @@ class Navigation:
     def push_pq(self,rank,item):
         self.open_pos.add(rank)
         self.buckets[rank].append(item)
-        self.min_ptr = min(self.min_ptr,rank)
+        if rank < self.min_ptr:
+            self.min_ptr = rank
         self.inserted_items += 1
     
     def pop_pq(self):
