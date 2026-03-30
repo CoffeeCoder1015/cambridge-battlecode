@@ -176,7 +176,7 @@ class Navigation:
                     self.map_lut[x][y] = 6
 
     def reset_pq(self):
-        self.min_ptr = 0
+        self.min_ptr = self.bucket_n
         self.inserted_items = 0
         while self.open_pos:
             top = self.open_pos.pop()
@@ -185,6 +185,7 @@ class Navigation:
     def push_pq(self,rank,item):
         self.open_pos.add(rank)
         self.buckets[rank].append(item)
+        self.min_ptr = min(self.min_ptr,rank)
         self.inserted_items += 1
     
     def pop_pq(self):
