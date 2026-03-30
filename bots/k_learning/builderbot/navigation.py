@@ -117,6 +117,9 @@ CARDINALS = [
 DIRECTIONS = [d for d in Direction if d != Direction.CENTRE]
 
 DELTAS = [ (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), ]
+REVERSE_DIR_CODES = [(i + 4) % len(DELTAS) for i in range(len(DELTAS))]
+DELTA_TO_DIRECTION = {direction.delta(): direction for direction in DIRECTIONS}
+DIR_CODE_TO_DIRECTION = [DELTA_TO_DIRECTION[delta] for delta in DELTAS]
 
 class Navigation:
     def __init__(self,w,h):
@@ -129,7 +132,6 @@ class Navigation:
 
         self.last_target = None
         self.visited = set()
-        self.path_cahce= []
         
         self.beam_width = 32
         self.bucket_n = self.w * self.h
@@ -138,12 +140,72 @@ class Navigation:
         self.inserted_items = 0
         self.buckets = [[] for _ in range(self.bucket_n)]
         self.open_pos = set()
+        self.parent_dir = array.array("b", [-1]) * self.bucket_n
+        self.parent_epoch = array.array("I", [0]) * self.bucket_n
+        self.next_dir = array.array("b", [-1]) * self.bucket_n
+        self.next_epoch = array.array("I", [0]) * self.bucket_n
+        self.search_epoch = 0
+        self.route_epoch = 0
+        self.max_a_star_expansions = 64
+        self.max_a_star_frontier = 32
     
     def _get_idx(self, x: int, y: int) -> int:
         return y * self.w + x
     
     def in_bounds(self,x:int,y:int):
         return 0 <= x < self.w and 0 <= y < self.h
+
+    def _begin_search(self):
+        self.search_epoch += 1
+        self.route_epoch = 0
+        return self.search_epoch
+
+    def _invalidate_route(self):
+        self.route_epoch = 0
+
+    def _step_idx(self, idx: int, dir_code: int) -> int:
+        x = idx % self.w
+        y = idx // self.w
+        dx, dy = DELTAS[dir_code]
+        return self._get_idx(x + dx, y + dy)
+
+    def _rebuild_route(self, start_idx: int, stopped_idx: int, search_epoch: int):
+        if stopped_idx == start_idx:
+            self._invalidate_route()
+            return
+
+        self.route_epoch = search_epoch
+        current_idx = stopped_idx
+        while current_idx != start_idx and self.parent_epoch[current_idx] == search_epoch:
+            reverse_dir = self.parent_dir[current_idx]
+            if reverse_dir < 0:
+                break
+            parent_idx = self._step_idx(current_idx, reverse_dir)
+            self.next_dir[parent_idx] = REVERSE_DIR_CODES[reverse_dir]
+            self.next_epoch[parent_idx] = self.route_epoch
+            current_idx = parent_idx
+
+        if current_idx != start_idx:
+            self._invalidate_route()
+
+    def _has_route_step(self, idx: int) -> bool:
+        return self.route_epoch != 0 and self.next_epoch[idx] == self.route_epoch and self.next_dir[idx] >= 0
+
+    def _heuristic(self, x: int, y: int, target_pos: Position) -> int:
+        return max(abs(x - target_pos.x), abs(y - target_pos.y))
+
+    def _pick_better_fallback(
+        self,
+        current_best: tuple[int, int, int, tuple[int, int]] | None,
+        node: tuple[int, int],
+        g_cost: int,
+        target_pos: Position,
+    ):
+        heuristic = self._heuristic(node[0], node[1], target_pos)
+        score = (heuristic, g_cost + heuristic, g_cost, node)
+        if current_best is None or score < current_best:
+            return score
+        return current_best
 
     def update_info(self,ct:Controller,current_pos:Position,nearby_tiles:list[Position],nearby_buildings:list[int]):
         self.current_pos = current_pos
@@ -205,15 +267,32 @@ class Navigation:
             self.open_pos.remove(self.min_ptr)
         self.inserted_items -= 1
         return ( self.min_ptr,top_item )         
+
+    def pop_worst_pq(self):
+        while self.max_ptr > 0 and not self.buckets[self.max_ptr]:
+            self.max_ptr -= 1
+
+        if not self.buckets[self.max_ptr]:
+            return None
+
+        top_item = self.buckets[self.max_ptr].pop()
+        if len(self.buckets[self.max_ptr]) == 0:
+            self.open_pos.remove(self.max_ptr)
+            while self.max_ptr > 0 and not self.buckets[self.max_ptr]:
+                self.max_ptr -= 1
+        self.inserted_items -= 1
+        return (self.max_ptr, top_item)
     
     def a_star(self,target_pos:Position):
         self.reset_pq()
-        self.push_pq(0,(self.current_pos.x,self.current_pos.y))
+        start = (self.current_pos.x,self.current_pos.y)
+        start_idx = self._get_idx(*start)
+        search_epoch = self._begin_search()
+        self.push_pq(0,start)
 
         check = [-1] * (self.w * self.h)
-        check[self._get_idx(self.current_pos.x,self.current_pos.y)] = 0
+        check[start_idx] = 0
 
-        full_path = {}
         stopped_at = (target_pos.x,target_pos.y)
         while self.open_pos:
             top = self.pop_pq()
@@ -223,7 +302,7 @@ class Navigation:
                 stopped_at = top[1]
                 break
             elapsed_dist = check[self._get_idx(*top[1])]
-            for deltas in DELTAS:
+            for dir_code, deltas in enumerate(DELTAS):
                 neighbor = ( top[1][0] + deltas[0],top[1][1] + deltas[1] )
                 if not (0 <= neighbor[0] < self.w and 0 <= neighbor[1] < self.h ) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
                     continue
@@ -233,93 +312,131 @@ class Navigation:
                 neighbor_dist = check[neighbor_idx]
                 if neighbor_dist == -1 or new_dist < neighbor_dist:
                     check[neighbor_idx] = new_dist
-                    full_path[neighbor] = top[1]
-                    rank = new_dist + max(abs(neighbor[0]-target_pos.x),abs(neighbor[1]-target_pos.y))
+                    self.parent_dir[neighbor_idx] = REVERSE_DIR_CODES[dir_code]
+                    self.parent_epoch[neighbor_idx] = search_epoch
+                    rank = new_dist + self._heuristic(neighbor[0], neighbor[1], target_pos)
                     self.push_pq(rank,neighbor)
+        self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
-        path = []
-        current = stopped_at
-        while current != (self.current_pos.x, self.current_pos.y):
-            path.append(current)
-            current = full_path[current]
-        self.path_cahce = path
-
-    def beam_search(self, target_pos: Position):
+    def a_star_cutoff(self, target_pos: Position, max_expansions: int | None = None):
+        self.reset_pq()
         start = (self.current_pos.x, self.current_pos.y)
+        start_idx = self._get_idx(*start)
+        search_epoch = self._begin_search()
         check = [-1] * (self.w * self.h)
-        check[self._get_idx(*start)] = 0
-
-        full_path = {}
+        check[start_idx] = 0
         stopped_at = start
-        beam = [start]
+        best_fallback = self._pick_better_fallback(None, start, 0, target_pos)
+        expansions = 0
+        budget = self.max_a_star_expansions if max_expansions is None else max_expansions
+        self.push_pq(0, start)
 
-        while beam:
-            next_layer = []
-            next_seen = set()
+        while self.open_pos and expansions < budget:
+            _, node = self.pop_pq()
+            expansions += 1
 
-            for node in beam:
-                reached_target = node == (target_pos.x, target_pos.y)
-                goes_into_unknown = self.map_lut[node[0]][node[1]] == 0
-                if reached_target or goes_into_unknown:
-                    stopped_at = node
-                    beam = []
-                    next_layer = []
-                    break
+            reached_target = node == (target_pos.x, target_pos.y)
+            goes_into_unknown = self.map_lut[node[0]][node[1]] == 0
+            if reached_target or goes_into_unknown:
+                stopped_at = node
+                break
 
-                elapsed_dist = check[self._get_idx(*node)]
-                for deltas in DELTAS:
-                    neighbor = (node[0] + deltas[0], node[1] + deltas[1])
-                    if not self.in_bounds(*neighbor) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
-                        continue
+            elapsed_dist = check[self._get_idx(*node)]
+            best_fallback = self._pick_better_fallback(best_fallback, node, elapsed_dist, target_pos)
+            for dir_code, deltas in enumerate(DELTAS):
+                neighbor = (node[0] + deltas[0], node[1] + deltas[1])
+                if not self.in_bounds(*neighbor) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
+                    continue
 
-                    new_dist = elapsed_dist + 1
-                    neighbor_idx = self._get_idx(*neighbor)
-                    neighbor_dist = check[neighbor_idx]
-                    if neighbor_dist != -1 and new_dist >= neighbor_dist:
-                        continue
+                new_dist = elapsed_dist + 1
+                neighbor_idx = self._get_idx(*neighbor)
+                neighbor_dist = check[neighbor_idx]
+                if neighbor_dist != -1 and new_dist >= neighbor_dist:
+                    continue
 
-                    check[neighbor_idx] = new_dist
-                    full_path[neighbor] = node
-                    if neighbor not in next_seen:
-                        next_seen.add(neighbor)
-                        score = new_dist + max(abs(neighbor[0] - target_pos.x), abs(neighbor[1] - target_pos.y))
-                        heuristic = max(abs(neighbor[0] - target_pos.x), abs(neighbor[1] - target_pos.y))
-                        heapq.heappush(next_layer, (-score, -heuristic, neighbor))
-                        if len(next_layer) > self.beam_width:
-                            heapq.heappop(next_layer)
+                check[neighbor_idx] = new_dist
+                self.parent_dir[neighbor_idx] = REVERSE_DIR_CODES[dir_code]
+                self.parent_epoch[neighbor_idx] = search_epoch
+                rank = new_dist + self._heuristic(neighbor[0], neighbor[1], target_pos)
+                self.push_pq(rank, neighbor)
+                best_fallback = self._pick_better_fallback(best_fallback, neighbor, new_dist, target_pos)
+        else:
+            if best_fallback is not None:
+                stopped_at = best_fallback[3]
 
-            if not next_layer:
-                continue
+        self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
-            beam = [pos for _, _, pos in sorted(next_layer, reverse=True)]
-            stopped_at = beam[0]
+    def a_star_bounded_frontier(self, target_pos: Position, max_frontier_size: int | None = None):
+        self.reset_pq()
+        start = (self.current_pos.x, self.current_pos.y)
+        start_idx = self._get_idx(*start)
+        search_epoch = self._begin_search()
+        check = [-1] * (self.w * self.h)
+        check[start_idx] = 0
+        stopped_at = start
+        best_fallback = self._pick_better_fallback(None, start, 0, target_pos)
+        frontier_limit = self.max_a_star_frontier if max_frontier_size is None else max_frontier_size
+        self.push_pq(0, start)
 
-        path = []
-        current = stopped_at
-        while current != start and current in full_path:
-            path.append(current)
-            current = full_path[current]
-        self.path_cahce = path
+        while self.open_pos:
+            _, node = self.pop_pq()
+
+            reached_target = node == (target_pos.x, target_pos.y)
+            goes_into_unknown = self.map_lut[node[0]][node[1]] == 0
+            if reached_target or goes_into_unknown:
+                stopped_at = node
+                break
+
+            elapsed_dist = check[self._get_idx(*node)]
+            best_fallback = self._pick_better_fallback(best_fallback, node, elapsed_dist, target_pos)
+            for dir_code, deltas in enumerate(DELTAS):
+                neighbor = (node[0] + deltas[0], node[1] + deltas[1])
+                if not self.in_bounds(*neighbor) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
+                    continue
+
+                new_dist = elapsed_dist + 1
+                neighbor_idx = self._get_idx(*neighbor)
+                neighbor_dist = check[neighbor_idx]
+                if neighbor_dist != -1 and new_dist >= neighbor_dist:
+                    continue
+
+                check[neighbor_idx] = new_dist
+                self.parent_dir[neighbor_idx] = REVERSE_DIR_CODES[dir_code]
+                self.parent_epoch[neighbor_idx] = search_epoch
+                rank = new_dist + self._heuristic(neighbor[0], neighbor[1], target_pos)
+                self.push_pq(rank, neighbor)
+                best_fallback = self._pick_better_fallback(best_fallback, neighbor, new_dist, target_pos)
+
+                if self.inserted_items > frontier_limit:
+                    self.pop_worst_pq()
+        else:
+            if best_fallback is not None:
+                stopped_at = best_fallback[3]
+
+        self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
     def move(self,ct:Controller,target_pos:Position):
         self.current_pos = ct.get_position()
-        if not self.path_cahce or self.last_target != target_pos:
+        current_idx = self._get_idx(self.current_pos.x, self.current_pos.y)
+        if self.last_target != target_pos or not self._has_route_step(current_idx):
             self.last_target = target_pos
+            self.a_star_bounded_frontier(target_pos)
             # self.a_star(target_pos)
-            self.beam_search(target_pos)
-        if not self.path_cahce:
+        if not self._has_route_step(current_idx):
             return False
-        next_pos = Position(*self.path_cahce.pop())
-        direction = self.current_pos.direction_to(next_pos)
+
+        direction = DIR_CODE_TO_DIRECTION[self.next_dir[current_idx]]
+        next_pos = self.current_pos.add(direction)
         can_move = ct.can_move(direction) or ct.can_build_road(next_pos)
         if not can_move:
+            self._invalidate_route()
+            self.a_star_bounded_frontier(target_pos)
             # self.a_star(target_pos)
-            self.beam_search(target_pos)
-            # TODO: path_cache empty guard
-            if not self.path_cahce:
+            current_idx = self._get_idx(self.current_pos.x, self.current_pos.y)
+            if not self._has_route_step(current_idx):
                 return False
-            next_pos = Position(*self.path_cahce.pop())
-            direction = self.current_pos.direction_to(next_pos)
+            direction = DIR_CODE_TO_DIRECTION[self.next_dir[current_idx]]
+            next_pos = self.current_pos.add(direction)
 
         if ct.can_move(direction):
             ct.move(direction)
