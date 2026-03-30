@@ -133,7 +133,6 @@ class Navigation:
         self.last_target = None
         self.visited = set()
         
-        self.beam_width = 32
         self.bucket_n = self.w * self.h
         self.min_ptr = 0
         self.max_ptr = 0
@@ -318,7 +317,12 @@ class Navigation:
                     self.push_pq(rank,neighbor)
         self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
-    def a_star_cutoff(self, target_pos: Position, max_expansions: int | None = None):
+    def a_star_limited(
+        self,
+        target_pos: Position,
+        max_expansions: int | None = None,
+        max_frontier_size: int | None = None,
+    ):
         self.reset_pq()
         start = (self.current_pos.x, self.current_pos.y)
         start_idx = self._get_idx(*start)
@@ -328,10 +332,11 @@ class Navigation:
         stopped_at = start
         best_fallback = self._pick_better_fallback(None, start, 0, target_pos)
         expansions = 0
-        budget = self.max_a_star_expansions if max_expansions is None else max_expansions
+        expansion_budget = self.max_a_star_expansions if max_expansions is None else max_expansions
+        frontier_limit = self.max_a_star_frontier if max_frontier_size is None else max_frontier_size
         self.push_pq(0, start)
 
-        while self.open_pos and expansions < budget:
+        while self.open_pos and expansions < expansion_budget:
             _, node = self.pop_pq()
             expansions += 1
 
@@ -360,53 +365,6 @@ class Navigation:
                 rank = new_dist + self._heuristic(neighbor[0], neighbor[1], target_pos)
                 self.push_pq(rank, neighbor)
                 best_fallback = self._pick_better_fallback(best_fallback, neighbor, new_dist, target_pos)
-        else:
-            if best_fallback is not None:
-                stopped_at = best_fallback[3]
-
-        self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
-
-    def a_star_bounded_frontier(self, target_pos: Position, max_frontier_size: int | None = None):
-        self.reset_pq()
-        start = (self.current_pos.x, self.current_pos.y)
-        start_idx = self._get_idx(*start)
-        search_epoch = self._begin_search()
-        check = [-1] * (self.w * self.h)
-        check[start_idx] = 0
-        stopped_at = start
-        best_fallback = self._pick_better_fallback(None, start, 0, target_pos)
-        frontier_limit = self.max_a_star_frontier if max_frontier_size is None else max_frontier_size
-        self.push_pq(0, start)
-
-        while self.open_pos:
-            _, node = self.pop_pq()
-
-            reached_target = node == (target_pos.x, target_pos.y)
-            goes_into_unknown = self.map_lut[node[0]][node[1]] == 0
-            if reached_target or goes_into_unknown:
-                stopped_at = node
-                break
-
-            elapsed_dist = check[self._get_idx(*node)]
-            best_fallback = self._pick_better_fallback(best_fallback, node, elapsed_dist, target_pos)
-            for dir_code, deltas in enumerate(DELTAS):
-                neighbor = (node[0] + deltas[0], node[1] + deltas[1])
-                if not self.in_bounds(*neighbor) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
-                    continue
-
-                new_dist = elapsed_dist + 1
-                neighbor_idx = self._get_idx(*neighbor)
-                neighbor_dist = check[neighbor_idx]
-                if neighbor_dist != -1 and new_dist >= neighbor_dist:
-                    continue
-
-                check[neighbor_idx] = new_dist
-                self.parent_dir[neighbor_idx] = REVERSE_DIR_CODES[dir_code]
-                self.parent_epoch[neighbor_idx] = search_epoch
-                rank = new_dist + self._heuristic(neighbor[0], neighbor[1], target_pos)
-                self.push_pq(rank, neighbor)
-                best_fallback = self._pick_better_fallback(best_fallback, neighbor, new_dist, target_pos)
-
                 if self.inserted_items > frontier_limit:
                     self.pop_worst_pq()
         else:
@@ -415,12 +373,18 @@ class Navigation:
 
         self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
+    def a_star_cutoff(self, target_pos: Position, max_expansions: int | None = None):
+        self.a_star_limited(target_pos, max_expansions=max_expansions)
+
+    def a_star_bounded_frontier(self, target_pos: Position, max_frontier_size: int | None = None):
+        self.a_star_limited(target_pos, max_frontier_size=max_frontier_size)
+
     def move(self,ct:Controller,target_pos:Position):
         self.current_pos = ct.get_position()
         current_idx = self._get_idx(self.current_pos.x, self.current_pos.y)
         if self.last_target != target_pos or not self._has_route_step(current_idx):
             self.last_target = target_pos
-            self.a_star_bounded_frontier(target_pos)
+            self.a_star_limited(target_pos)
             # self.a_star(target_pos)
         if not self._has_route_step(current_idx):
             return False
@@ -430,7 +394,7 @@ class Navigation:
         can_move = ct.can_move(direction) or ct.can_build_road(next_pos)
         if not can_move:
             self._invalidate_route()
-            self.a_star_bounded_frontier(target_pos)
+            self.a_star_limited(target_pos)
             # self.a_star(target_pos)
             current_idx = self._get_idx(self.current_pos.x, self.current_pos.y)
             if not self._has_route_step(current_idx):
