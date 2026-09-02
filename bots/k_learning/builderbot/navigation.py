@@ -242,7 +242,7 @@ class Navigation:
                         x,y = pos.add(direction)
                         self.map_lut[x][y] = 5
                 case EntityType.HARVESTER:
-                    self.map_lut[x][y] = 6
+                   self.map_lut[x][y] = 6
 
         return ore_locations
 
@@ -504,9 +504,9 @@ class Navigation:
         self.pq = new_pq
         final_target = Position(*self.pq[0][1])
         ct.draw_indicator_line(self.current_pos,final_target,0,255,0)
-        self.move(ct,final_target)
+        status = self.move(ct,final_target)
         # Pop inaccessible targets
-        if ct.get_position() == self.current_pos:
+        if status is False:
             pos = self.pq[0][1]
             if self.map_lut[pos[0]][pos[1]] > 0 and self.permanent_scores.get(pos,0) < self.bucket_n:
                 self.permanent_scores[pos] = 2* self.permanent_scores.get(pos,100)
