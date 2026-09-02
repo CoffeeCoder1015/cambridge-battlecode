@@ -39,9 +39,8 @@ class Core:
         res = ct.get_global_resources()
         titanium = res[0]
         rnd = ct.get_current_round()
-        if rnd > 0:
+        if rnd > 2:
             return
-        
         # 0.1 Adaptive Expense Tracking
         # If the swarm bottomed out the bank entirely (< 3 Ti for a conveyor),
         # they wanted to spend more but starved. Ratchet up the hold buffer incrementally!

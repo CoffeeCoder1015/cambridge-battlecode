@@ -30,7 +30,7 @@ class SymmetryAnalyzer:
         cx, cy = self.ally_core_pos.x, self.ally_core_pos.y
         overlap_x = abs(2 * cx - (self.w - 1)) <= 2
         overlap_y = abs(2 * cy - (self.h - 1)) <= 2
-        
+
         if overlap_x and "horizontal" in self.possible_symmetries:
             self.possible_symmetries.remove("horizontal")
         if overlap_y and "vertical" in self.possible_symmetries:
@@ -129,6 +129,7 @@ class Navigation:
         self.current_pos: Position | None = None
 
         self.pq = []
+        self.permanent_scores = {}
 
         self.last_target = None
         self.visited = set()
@@ -208,6 +209,9 @@ class Navigation:
 
     def update_info(self,ct:Controller,current_pos:Position,nearby_tiles:list[Position],nearby_buildings:list[int]):
         self.current_pos = current_pos
+
+        ore_locations = []
+
         # Update LUT
         for pos in nearby_tiles:
             x,y = pos
@@ -217,6 +221,8 @@ class Navigation:
                     self.map_lut[x][y] = 1
                 case Environment.ORE_TITANIUM:
                     self.map_lut[x][y] = 2
+                    dist = max(abs(self.current_pos.x-x),abs(self.current_pos.y-y))
+                    heapq.heappush(ore_locations,(dist,(x,y)))
                 case Environment.ORE_AXIONITE:
                     self.map_lut[x][y] = 3
                 case Environment.WALL:
@@ -236,7 +242,9 @@ class Navigation:
                         x,y = pos.add(direction)
                         self.map_lut[x][y] = 5
                 case EntityType.HARVESTER:
-                    self.map_lut[x][y] = 6
+                   self.map_lut[x][y] = 6
+
+        return ore_locations
 
     def reset_pq(self):
         self.min_ptr = self.bucket_n
@@ -289,7 +297,7 @@ class Navigation:
         search_epoch = self._begin_search()
         self.push_pq(0,start)
 
-        check = [-1] * (self.w * self.h)
+        check = array.array("h", [-1]) * self.bucket_n
         check[start_idx] = 0
 
         stopped_at = (target_pos.x,target_pos.y)
@@ -374,10 +382,101 @@ class Navigation:
         self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
     def a_star_cutoff(self, target_pos: Position, max_expansions: int | None = None):
-        self.a_star_limited(target_pos, max_expansions=max_expansions)
+        self.reset_pq()
+        start = (self.current_pos.x, self.current_pos.y)
+        start_idx = self._get_idx(*start)
+        search_epoch = self._begin_search()
+        check = [-1] * (self.w * self.h)
+        check[start_idx] = 0
+        stopped_at = start
+        best_fallback = self._pick_better_fallback(None, start, 0, target_pos)
+        expansions = 0
+        budget = self.max_a_star_expansions if max_expansions is None else max_expansions
+        self.push_pq(0, start)
+
+        while self.open_pos and expansions < budget:
+            _, node = self.pop_pq()
+            expansions += 1
+
+            reached_target = node == (target_pos.x, target_pos.y)
+            goes_into_unknown = self.map_lut[node[0]][node[1]] == 0
+            if reached_target or goes_into_unknown:
+                stopped_at = node
+                break
+
+            elapsed_dist = check[self._get_idx(*node)]
+            best_fallback = self._pick_better_fallback(best_fallback, node, elapsed_dist, target_pos)
+            for dir_code, deltas in enumerate(DELTAS):
+                neighbor = (node[0] + deltas[0], node[1] + deltas[1])
+                if not self.in_bounds(*neighbor) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
+                    continue
+
+                new_dist = elapsed_dist + 1
+                neighbor_idx = self._get_idx(*neighbor)
+                neighbor_dist = check[neighbor_idx]
+                if neighbor_dist != -1 and new_dist >= neighbor_dist:
+                    continue
+
+                check[neighbor_idx] = new_dist
+                self.parent_dir[neighbor_idx] = REVERSE_DIR_CODES[dir_code]
+                self.parent_epoch[neighbor_idx] = search_epoch
+                rank = new_dist + self._heuristic(neighbor[0], neighbor[1], target_pos)
+                self.push_pq(rank, neighbor)
+                best_fallback = self._pick_better_fallback(best_fallback, neighbor, new_dist, target_pos)
+        else:
+            if best_fallback is not None:
+                stopped_at = best_fallback[3]
+
+        self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
     def a_star_bounded_frontier(self, target_pos: Position, max_frontier_size: int | None = None):
-        self.a_star_limited(target_pos, max_frontier_size=max_frontier_size)
+        self.reset_pq()
+        start = (self.current_pos.x, self.current_pos.y)
+        start_idx = self._get_idx(*start)
+        search_epoch = self._begin_search()
+        check = [-1] * (self.w * self.h)
+        check[start_idx] = 0
+        stopped_at = start
+        best_fallback = self._pick_better_fallback(None, start, 0, target_pos)
+        frontier_limit = self.max_a_star_frontier if max_frontier_size is None else max_frontier_size
+        self.push_pq(0, start)
+
+        while self.open_pos:
+            _, node = self.pop_pq()
+
+            reached_target = node == (target_pos.x, target_pos.y)
+            goes_into_unknown = self.map_lut[node[0]][node[1]] == 0
+            if reached_target or goes_into_unknown:
+                stopped_at = node
+                break
+
+            elapsed_dist = check[self._get_idx(*node)]
+            best_fallback = self._pick_better_fallback(best_fallback, node, elapsed_dist, target_pos)
+            for dir_code, deltas in enumerate(DELTAS):
+                neighbor = (node[0] + deltas[0], node[1] + deltas[1])
+                if not self.in_bounds(*neighbor) or self.map_lut[neighbor[0]][neighbor[1]] >= 4:
+                    continue
+
+                new_dist = elapsed_dist + 1
+                neighbor_idx = self._get_idx(*neighbor)
+                neighbor_dist = check[neighbor_idx]
+                if neighbor_dist != -1 and new_dist >= neighbor_dist:
+                    continue
+
+                check[neighbor_idx] = new_dist
+                self.parent_dir[neighbor_idx] = REVERSE_DIR_CODES[dir_code]
+                self.parent_epoch[neighbor_idx] = search_epoch
+                rank = new_dist + self._heuristic(neighbor[0], neighbor[1], target_pos)
+                self.push_pq(rank, neighbor)
+                best_fallback = self._pick_better_fallback(best_fallback, neighbor, new_dist, target_pos)
+
+                if self.inserted_items > frontier_limit:
+                    self.pop_worst_pq()
+        else:
+            if best_fallback is not None:
+                stopped_at = best_fallback[3]
+
+        self._rebuild_route(start_idx, self._get_idx(*stopped_at), search_epoch)
 
     def move(self,ct:Controller,target_pos:Position):
         self.current_pos = ct.get_position()
@@ -410,7 +509,11 @@ class Navigation:
             ct.move(direction)
             return True
 
-    def get_neighbors(self,root_pos=None):
+        # White dot when failed to move
+        ct.draw_indicator_dot(self.current_pos,255,255,255)
+        return False
+
+    def get_neighbors(self,ct:Controller,root_pos=None):
         start_pos = self.current_pos
         if root_pos:
             start_pos = root_pos
@@ -429,29 +532,40 @@ class Navigation:
             if self.in_bounds(*q) and q not in self.visited:
                 neighbors.append((0,q))
                 self.visited.add(q)
+                self.permanent_scores[q] = ct.get_current_round()
         return neighbors
 
     def explore(self,ct:Controller):
         for _,p in self.pq:
             ct.draw_indicator_dot(Position(*p),255,0,0)
 
-        if not self.pq:
-            self.pq = self.get_neighbors()
+        if not self.visited:
+            self.pq = self.get_neighbors(ct)
 
         top = self.pq[0][1]
         if (self.current_pos.x,self.current_pos.y) == top:
             self.pq.pop(0)
-            self.pq.extend(self.get_neighbors())
+            self.pq.extend(self.get_neighbors(ct))
         elif self.map_lut[top[0]][top[1]] >= 4: # Impassible
-            self.pq.pop(0)
+            popped= self.pq.pop(0)
+            self.pq.extend(self.get_neighbors(ct,Position(*popped[1])))
         
         # Update distances
         new_pq = []
         for i in range(len(self.pq)):
             _,pos = self.pq[i]
+            perma_score = self.permanent_scores.get(pos,0)
             new_val = max(abs(self.current_pos.x-pos[0]),abs(self.current_pos.y-pos[1]))
-            heapq.heappush(new_pq,(new_val,pos))
+            rank = new_val + perma_score
+            heapq.heappush(new_pq,(rank,pos))
         self.pq = new_pq
         final_target = Position(*self.pq[0][1])
         ct.draw_indicator_line(self.current_pos,final_target,0,255,0)
-        self.move(ct,final_target)
+        status = self.move(ct,final_target)
+        # Pop inaccessible targets
+        if status is False:
+            pos = self.pq[0][1]
+            if self.map_lut[pos[0]][pos[1]] > 0 and self.permanent_scores.get(pos,0) < self.bucket_n:
+                self.permanent_scores[pos] = 2* self.permanent_scores.get(pos,100)
+            else:
+                self.pq.pop(0)
